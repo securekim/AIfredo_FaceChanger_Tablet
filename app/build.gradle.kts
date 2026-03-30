@@ -1,11 +1,11 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android) // 이 줄을 추가하여 Kotlin 컴파일을 활성화합니다.
+    alias(libs.plugins.kotlin.android)
 }
 
 android {
     namespace = "com.example.aifredo_facechanger"
-    compileSdk = 34 // 36은 아직 불안정할 수 있으므로 안정적인 34 또는 35 권장
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.example.aifredo_facechanger"
@@ -36,8 +36,15 @@ android {
     buildFeatures {
         viewBinding = true
     }
+
+    androidResources {
+        noCompress += listOf("tflite", "task")
+    }
     
     packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
         jniLibs {
             useLegacyPackaging = true
         }
@@ -65,6 +72,12 @@ dependencies {
 
     // MediaPipe
     implementation(libs.mediapipe.tasks.vision)
+
+    // TensorFlow Lite
+    implementation(libs.tensorflow.lite)
+    implementation(libs.tensorflow.lite.gpu)
+    implementation(libs.tensorflow.lite.gpu.api)
+    implementation(libs.tensorflow.lite.support)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

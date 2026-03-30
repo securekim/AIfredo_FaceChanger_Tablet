@@ -4,19 +4,96 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:padding="24dp"
     tools:context=".ui.settings.SettingsFragment">
+
+    <TextView
+        android:id="@+id/text_settings_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Settings"
+        android:textSize="24sp"
+        android:textStyle="bold"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Model Selection Section -->
+    <TextView
+        android:id="@+id/text_model_label"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="32dp"
+        android:text="Select Face Stylizer Model:"
+        android:textSize="18sp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/text_settings_title" />
+
+    <RadioGroup
+        android:id="@+id/radioGroup_model"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/text_model_label">
+
+        <RadioButton
+            android:id="@+id/radio_mediapipe_default"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="MediaPipe Default" />
+
+        <RadioButton
+            android:id="@+id/radio_mediapipe_aifredo"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="MediaPipe AIfredo (Custom)" />
+
+        <RadioButton
+            android:id="@+id/radio_cartoongan_default"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="CartoonGAN Default" />
+    </RadioGroup>
+
+    <!-- Rendering Mode Selection Section -->
+    <TextView
+        android:id="@+id/text_render_mode_label"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:text="Select Rendering Mode:"
+        android:textSize="18sp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/radioGroup_model" />
+
+    <RadioGroup
+        android:id="@+id/radioGroup_render_mode"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/text_render_mode_label">
+
+        <RadioButton
+            android:id="@+id/radio_face_only"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Face Only (Background Original)" />
+
+        <RadioButton
+            android:id="@+id/radio_full_frame"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Full Frame (Everything Stylized)" />
+    </RadioGroup>
 
     <TextView
         android:id="@+id/text_settings"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
-        android:layout_marginTop="8dp"
-        android:layout_marginEnd="8dp"
+        android:layout_marginTop="32dp"
         android:textAlignment="center"
-        android:textSize="20sp"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent" />
+        android:visibility="gone"
+        app:layout_constraintTop_toBottomOf="@id/radioGroup_render_mode" />
+
 </androidx.constraintlayout.widget.ConstraintLayout>

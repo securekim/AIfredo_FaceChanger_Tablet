@@ -25,20 +25,21 @@
         android:id="@+id/content_main"
         layout="@layout/content_main" />
 
-    <!-- This CoordinatorLayout is to dodge the BottomNavigationView when the Snackbar is shown -->
-    <androidx.coordinatorlayout.widget.CoordinatorLayout
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:layout_marginBottom="56dp"
-        android:background="@android:color/transparent">
+    <!-- AIfredo Brand Logo in Bottom Right -->
+    <TextView
+        android:id="@+id/brand_logo"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="20dp"
+        android:text="AIfredo"
+        android:textColor="#CCFFFFFF"
+        android:textSize="22sp"
+        android:textStyle="bold|italic"
+        android:fontFamily="sans-serif-black"
+        android:shadowColor="#000000"
+        android:shadowDx="2"
+        android:shadowDy="2"
+        android:shadowRadius="4" />
 
-        <com.google.android.material.floatingactionbutton.FloatingActionButton
-            android:id="@+id/fab"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="bottom|end"
-            android:layout_margin="@dimen/fab_margin"
-            android:contentDescription="@string/fab_content_description"
-            app:srcCompat="@android:drawable/ic_dialog_email" />
-    </androidx.coordinatorlayout.widget.CoordinatorLayout>
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

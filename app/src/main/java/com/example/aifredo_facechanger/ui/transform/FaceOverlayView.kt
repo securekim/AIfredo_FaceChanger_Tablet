@@ -4,161 +4,121 @@ import android.content.Context
 import android.graphics.*
 import android.util.AttributeSet
 import android.view.View
+import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
+import kotlin.math.max
 
 class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, attrs) {
 
     private var originalBitmap: Bitmap? = null
-    private var stylizedFace: Bitmap? = null
-    private var faceRect: RectF? = null
-    private var poseResult: PoseLandmarkerResult? = null
+    private var stylizedFullFrame: Bitmap? = null
+    private var lastStylizedFaceResult: FaceLandmarkerResult? = null
+    private var currentFaceResult: FaceLandmarkerResult? = null
+    private var currentPoseResult: PoseLandmarkerResult? = null
+    private var renderMode: String = "Face_Only"
 
-    // 깜빡임 방지를 위한 캐시
-    private var lastStylizedFace: Bitmap? = null
-    private var lastFaceRect: RectF? = null
-    
-    private val paint = Paint().apply {
-        isAntiAlias = true
-        isFilterBitmap = true
-    }
-
-    // 실물 얼굴을 가리기 위한 마스크용 페인트 (배경과 색상을 맞춰서 자연스럽게 가림)
-    private val maskPaint = Paint().apply {
-        color = Color.BLACK
-        style = Paint.Style.FILL
-    }
-
-    private val linePaint = Paint().apply {
-        color = Color.parseColor("#00FFFF")
-        strokeWidth = 6f
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-    }
-
+    private val paint = Paint().apply { isAntiAlias = true; isFilterBitmap = true }
     private val pointPaint = Paint().apply {
-        color = Color.YELLOW
+        color = Color.GREEN
         style = Paint.Style.FILL
     }
+    private val facePath = Path()
+    private val alignmentMatrix = Matrix()
 
-    private val POSE_CONNECTIONS = listOf(
-        Pair(0, 1), Pair(1, 2), Pair(2, 3), Pair(3, 7),
-        Pair(0, 4), Pair(4, 5), Pair(5, 6), Pair(6, 8),
-        Pair(9, 10),
-        Pair(11, 12), Pair(11, 13), Pair(13, 15), Pair(12, 14), Pair(14, 16),
-        Pair(11, 23), Pair(12, 24), Pair(23, 24)
+    private val faceOutlineIndices = intArrayOf(
+        10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377,
+        152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109
     )
 
-    private val destRectLeft = RectF()
-    private val destRectRight = RectF()
-    private val facePath = Path()
-
-    fun updateFrame(original: Bitmap, stylized: Bitmap?, rect: RectF?, pose: PoseLandmarkerResult?) {
+    fun updateFrame(original: Bitmap, stylized: Bitmap?, stylizedFace: FaceLandmarkerResult?,
+                    currentFace: FaceLandmarkerResult?, currentPose: PoseLandmarkerResult?, mode: String) {
         this.originalBitmap = original
-        
-        // 새로운 데이터가 오면 캐시 업데이트, 아니면 이전 캐시 유지
-        if (stylized != null && !stylized.isRecycled) {
-            this.stylizedFace = stylized
-            this.lastStylizedFace = stylized
-        } else {
-            this.stylizedFace = lastStylizedFace
-        }
-        
-        if (rect != null) {
-            this.faceRect = rect
-            this.lastFaceRect = rect
-        } else {
-            this.faceRect = lastFaceRect
-        }
-        
-        this.poseResult = pose
+        this.stylizedFullFrame = stylized
+        this.lastStylizedFaceResult = stylizedFace
+        this.currentFaceResult = currentFace
+        this.currentPoseResult = currentPose
+        this.renderMode = mode
         invalidate()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        
         val bitmap = originalBitmap ?: return
         if (bitmap.isRecycled) return
 
         val midX = width / 2f
-        val screenHeight = height.toFloat()
-        
-        // 스케일 계산 (중앙 정렬)
-        val scale = Math.max((width / 2f) / bitmap.width, screenHeight / bitmap.height)
-        val drawWidth = bitmap.width * scale
-        val drawHeight = bitmap.height * scale
-        val offsetX = ((width / 2f) - drawWidth) / 2f
-        val offsetY = (screenHeight - drawHeight) / 2f
+        val scale = max(midX / bitmap.width, height.toFloat() / bitmap.height)
+        val drawW = bitmap.width * scale
+        val drawH = bitmap.height * scale
+        val offsetX = (midX - drawW) / 2f
+        val offsetY = (height.toFloat() - drawH) / 2f
+        val offX = midX + offsetX
 
-        destRectLeft.set(offsetX, offsetY, offsetX + drawWidth, offsetY + drawHeight)
-        destRectRight.set(midX + offsetX, offsetY, midX + offsetX + drawWidth, offsetY + drawHeight)
-
-        // 1. 좌측 원본 영상
+        // 1. 좌측 원본
         canvas.save()
-        canvas.clipRect(0f, 0f, midX, screenHeight)
-        canvas.drawBitmap(bitmap, null, destRectLeft, paint)
+        canvas.clipRect(0f, 0f, midX, height.toFloat())
+        canvas.drawBitmap(bitmap, null, RectF(offsetX, offsetY, offsetX + drawW, offsetY + drawH), paint)
         canvas.restore()
 
-        // 2. 우측 영상 영역
+        // 2. 우측
         canvas.save()
-        canvas.clipRect(midX, 0f, width.toFloat(), screenHeight)
-        
-        // 우측 배경 그리기 (원본 밝기 그대로 유지)
-        canvas.drawBitmap(bitmap, null, destRectRight, paint)
+        canvas.clipRect(midX, 0f, width.toFloat(), height.toFloat())
+        canvas.drawBitmap(bitmap, null, RectF(offX, offsetY, offX + drawW, offsetY + drawH), paint)
 
-        // 얼굴 영역 처리 (실제 얼굴이 절대 안 보이도록 함)
-        val activeRect = faceRect
-        val activeFace = stylizedFace
+        val stylized = stylizedFullFrame
+        val curFace = currentFaceResult?.faceLandmarks()?.getOrNull(0)
 
-        if (activeRect != null) {
-            val rightFaceRect = RectF(
-                midX + offsetX + (activeRect.left * scale),
-                offsetY + (activeRect.top * scale),
-                midX + offsetX + (activeRect.right * scale),
-                offsetY + (activeRect.bottom * scale)
+        if (stylized != null && !stylized.isRecycled && curFace != null) {
+            // 얼굴 윤곽 패스 생성
+            facePath.reset()
+            for (i in faceOutlineIndices.indices) {
+                val p = curFace[faceOutlineIndices[i]]
+                val px = offX + (p.x() * drawW)
+                val py = offsetY + (p.y() * drawH)
+                if (i == 0) facePath.moveTo(px, py) else facePath.lineTo(px, py)
+            }
+            facePath.close()
+
+            canvas.save()
+            canvas.clipPath(facePath)
+            
+            // 왜곡(회전, 틸팅, 비정상적 확대)을 방지하기 위해 정방형 사각형 영역에 드로잉
+            // TransformFragment의 크롭 로직과 동일하게 1.5배 영역을 계산
+            val minX = curFace.minOf { it.x() }
+            val maxX = curFace.maxOf { it.x() }
+            val minY = curFace.minOf { it.y() }
+            val maxY = curFace.maxOf { it.y() }
+            
+            val centerX = (minX + maxX) / 2f
+            val centerY = (minY + maxY) / 2f
+            val fW = maxX - minX
+            val fH = maxY - minY
+            val size = max(fW, fH) * 1.5f
+            
+            val left = centerX - size / 2f
+            val top = centerY - size / 2f
+            
+            val destRect = RectF(
+                offX + left * drawW,
+                offsetY + top * drawH,
+                offX + (left + size) * drawW,
+                offsetY + (top + size) * drawH
             )
-
-            // 원본 얼굴 위치를 가림 (배경색과 유사하게 처리하거나 검정으로 마스킹)
-            // 여기서는 실물이 절대 안 보이게 검정으로 가린 후 위에 그림
-            canvas.drawOval(rightFaceRect, maskPaint)
-
-            // 3. 변형된 얼굴 그리기 (마스크 위에 그림)
-            if (activeFace != null && !activeFace.isRecycled) {
-                facePath.reset()
-                facePath.addOval(rightFaceRect, Path.Direction.CW)
-                canvas.save()
-                canvas.clipPath(facePath)
-                canvas.drawBitmap(activeFace, null, rightFaceRect, paint)
-                canvas.restore()
-            }
+            
+            // 행렬 변환 없이 사각형 영역에 그대로 그려 회전과 틸팅을 제거함
+            canvas.drawBitmap(stylized, null, destRect, paint)
+            canvas.restore()
         }
 
-        // 4. 관절 표시 (얼굴 위에 그려짐)
-        poseResult?.let { result ->
-            for (landmarks in result.landmarks()) {
-                // 선 그리기
-                for (connection in POSE_CONNECTIONS) {
-                    if (connection.first < landmarks.size && connection.second < landmarks.size) {
-                        val start = landmarks[connection.first]
-                        val end = landmarks[connection.second]
-                        val sx = midX + offsetX + (start.x() * drawWidth)
-                        val sy = offsetY + (start.y() * drawHeight)
-                        val ex = midX + offsetX + (end.x() * drawWidth)
-                        val ey = offsetY + (end.y() * drawHeight)
-                        canvas.drawLine(sx, sy, ex, ey, linePaint)
-                    }
-                }
-                // 점 그리기
-                for (landmark in landmarks) {
-                    val px = midX + offsetX + (landmark.x() * drawWidth)
-                    val py = offsetY + (landmark.y() * drawHeight)
-                    canvas.drawCircle(px, py, 6f, pointPaint)
-                }
-            }
+        // 랜드마크 점 그리기 (초록색) - 기존 로직 유지
+        curFace?.forEach {
+            canvas.drawCircle(offX + it.x() * drawW, offsetY + it.y() * drawH, 3f, pointPaint)
         }
+        currentPoseResult?.landmarks()?.getOrNull(0)?.forEach {
+            canvas.drawCircle(offX + it.x() * drawW, offsetY + it.y() * drawH, 3f, pointPaint)
+        }
+
         canvas.restore()
-
-        // 5. 중앙 구분선
-        canvas.drawLine(midX, 0f, midX, screenHeight, linePaint.apply { color = Color.WHITE; strokeWidth = 3f })
+        canvas.drawLine(midX, 0f, midX, height.toFloat(), Paint().apply { color = Color.WHITE; strokeWidth = 3f })
     }
 }

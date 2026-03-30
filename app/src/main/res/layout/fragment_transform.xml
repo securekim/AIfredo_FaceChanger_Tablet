@@ -30,6 +30,59 @@
         app:layout_constraintStart_toStartOf="parent"
         android:text="Status: Initializing..." />
 
+    <!-- Version/Time Display in Upper Right -->
+    <TextView
+        android:id="@+id/version_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        android:background="#80000000"
+        android:padding="8dp"
+        android:textColor="#00FF00"
+        android:textSize="12sp"
+        android:textStyle="bold"
+        android:fontFamily="monospace"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:text="03.11.19.30.55" />
+
+    <!-- Identity Profile Thumbnails -->
+    <LinearLayout
+        android:id="@+id/profileContainer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="60dp"
+        android:layout_marginEnd="16dp"
+        android:orientation="vertical"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <ImageView
+            android:id="@+id/imgFront"
+            android:layout_width="60dp"
+            android:layout_height="60dp"
+            android:layout_marginBottom="4dp"
+            android:background="#80000000"
+            android:scaleType="centerCrop"
+            android:alpha="0.3" />
+        <ImageView
+            android:id="@+id/imgLeft"
+            android:layout_width="60dp"
+            android:layout_height="60dp"
+            android:layout_marginBottom="4dp"
+            android:background="#80000000"
+            android:scaleType="centerCrop"
+            android:alpha="0.3" />
+        <ImageView
+            android:id="@+id/imgRight"
+            android:layout_width="60dp"
+            android:layout_height="60dp"
+            android:layout_marginBottom="4dp"
+            android:background="#80000000"
+            android:scaleType="centerCrop"
+            android:alpha="0.3" />
+    </LinearLayout>
+
     <androidx.core.widget.NestedScrollView
         android:id="@+id/logScroll"
         android:layout_width="0dp"
