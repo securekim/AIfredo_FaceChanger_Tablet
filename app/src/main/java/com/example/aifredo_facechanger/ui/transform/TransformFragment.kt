@@ -73,8 +73,6 @@ class TransformFragment : Fragment() {
     @Volatile private var isStylizing = false
 
     private val TAG = "AIfredo_Transform"
-    private var lastStylizeTime: Long = 0
-    private val STYLIZE_INTERVAL = 100L 
     private var currentModelPref: String = "CartoonGAN_Default"
     private var renderMode: String = "Face_Only"
     private val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
@@ -130,7 +128,6 @@ class TransformFragment : Fragment() {
         } catch (e: Exception) { 
             addLog("Landmarker Warning: Using CPU")
             try {
-                // Retry with CPU if GPU fails
                 faceLandmarker = FaceLandmarker.createFromOptions(context, FaceLandmarker.FaceLandmarkerOptions.builder()
                     .setBaseOptions(BaseOptions.builder().setDelegate(Delegate.CPU).setModelAssetPath(faceModel).build())
                     .setRunningMode(RunningMode.LIVE_STREAM)
@@ -169,11 +166,8 @@ class TransformFragment : Fragment() {
                         tfliteInterpreter = Interpreter(modelBuffer, options)
                         addLog("TFLite Loaded (GPU)")
                     } catch (e: Exception) {
-                        Log.e(TAG, "GPU Delegate failed to apply: ${e.message}")
                         gpuDelegate?.close()
                         gpuDelegate = null
-
-                        // Fallback to CPU with clean options (do not reuse the options object that had the delegate)
                         val cpuOptions = Interpreter.Options().setNumThreads(4)
                         tfliteInterpreter = Interpreter(modelBuffer, cpuOptions)
                         addLog("TFLite Loaded (CPU Fallback)")
@@ -190,14 +184,13 @@ class TransformFragment : Fragment() {
                     modelInputWidth = inputShape[2]
                 }
             } catch (e: Exception) {
-                addLog("Model File Error: ${e.message}")
-                Log.e(TAG, "TFLite Load Error", e)
+                addLog("Model Error: ${e.message}")
             }
         } else {
             try {
                 faceStylizer = FaceStylizer.createFromOptions(context, FaceStylizer.FaceStylizerOptions.builder()
                     .setBaseOptions(BaseOptions.builder().setDelegate(Delegate.GPU).setModelAssetPath(modelName).build()).build())
-                addLog("MediaPipe Stylizer Loaded")
+                addLog("MediaPipe Stylizer Ready")
             } catch (e: Exception) {
                 addLog("Stylizer Error: ${e.message}")
             }
@@ -221,17 +214,13 @@ class TransformFragment : Fragment() {
         val ts = result.timestampMs()
         val capturedBmp = frameCache[ts] ?: return
         
-        val currentTime = System.currentTimeMillis()
-        if (!isStylizing && (currentTime - lastStylizeTime > STYLIZE_INTERVAL)) {
-            if (result.faceLandmarks().isNotEmpty()) {
-                performStylization(currentTime, capturedBmp, result)
-            }
+        if (!isStylizing && result.faceLandmarks().isNotEmpty()) {
+            performStylization(capturedBmp, result)
         }
     }
 
-    private fun performStylization(currentTime: Long, targetBmp: Bitmap, faceRes: FaceLandmarkerResult) {
+    private fun performStylization(targetBmp: Bitmap, faceRes: FaceLandmarkerResult) {
         isStylizing = true
-        lastStylizeTime = currentTime
         
         stylizerExecutor?.execute {
             try {
@@ -279,15 +268,21 @@ class TransformFragment : Fragment() {
                         tfliteInterpreter!!.run(inputBuffer, outputBuffer)
                         outputBuffer.rewind()
                         
-                        val resultBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
-                        for (y in 0 until outH) {
-                            for (x in 0 until outW) {
-                                val r = (outputBuffer.float * 255).toInt().coerceIn(0, 255)
-                                val g = (outputBuffer.float * 255).toInt().coerceIn(0, 255)
-                                val b = (outputBuffer.float * 255).toInt().coerceIn(0, 255)
-                                resultBmp.setPixel(x, y, Color.rgb(r, g, b))
-                            }
+                        // [최적화] Bulk copy: ByteBuffer에서 FloatArray로 한 번에 복사
+                        val pixelCount = outW * outH
+                        val outputFloats = FloatArray(pixelCount * 3)
+                        outputBuffer.asFloatBuffer().get(outputFloats)
+                        
+                        val pixels = IntArray(pixelCount)
+                        for (i in 0 until pixelCount) {
+                            val r = (outputFloats[i * 3] * 255).toInt().coerceIn(0, 255)
+                            val g = (outputFloats[i * 3 + 1] * 255).toInt().coerceIn(0, 255)
+                            val b = (outputFloats[i * 3 + 2] * 255).toInt().coerceIn(0, 255)
+                            pixels[i] = -0x1000000 or (r shl 16) or (g shl 8) or b
                         }
+                        
+                        val resultBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+                        resultBmp.setPixels(pixels, 0, outW, 0, 0, outW, outH)
                         
                         activity?.runOnUiThread { 
                             val old = lastStylizedBitmap
@@ -337,11 +332,10 @@ class TransformFragment : Fragment() {
         val ts = System.currentTimeMillis()
         frameCache[ts] = newFrame
         
-        // Proactive cache cleanup in every frame
         val iterator = frameCache.keys.iterator()
         while (iterator.hasNext()) {
             val key = iterator.next()
-            if (key < ts - 500) {
+            if (key < ts - 300) {
                 frameCache[key]?.let { if (!it.isRecycled) it.recycle() }
                 iterator.remove()
             }
@@ -368,7 +362,7 @@ class TransformFragment : Fragment() {
             val imageAnalyzer = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                .setTargetResolution(Size(640, 480)) // Reduced resolution to save memory
+                .setTargetResolution(Size(640, 480))
                 .build().also { it.setAnalyzer(cameraExecutor!!) { proxy -> analyzeFrame(proxy) } }
             try {
                 cameraProvider.unbindAll()
