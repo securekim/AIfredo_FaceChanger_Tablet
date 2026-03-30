@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.*
 import android.util.AttributeSet
 import android.view.View
+import com.example.aifredo_facechanger.utils.OneEuroFilter
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
 import kotlin.math.max
@@ -17,13 +18,17 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
     private var currentPoseResult: PoseLandmarkerResult? = null
     private var renderMode: String = "Face_Only"
 
+    // OneEuroFilter instances for Pose landmarks to reduce jitter
+    private val poseFiltersX = mutableMapOf<Int, OneEuroFilter>()
+    private val poseFiltersY = mutableMapOf<Int, OneEuroFilter>()
+    private var filteredPoseLandmarks: List<PointF>? = null
+
     private val paint = Paint().apply { isAntiAlias = true; isFilterBitmap = true }
     private val pointPaint = Paint().apply {
         color = Color.GREEN
         style = Paint.Style.FILL
     }
     private val facePath = Path()
-    private val alignmentMatrix = Matrix()
 
     private val faceOutlineIndices = intArrayOf(
         10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377,
@@ -38,7 +43,32 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
         this.currentFaceResult = currentFace
         this.currentPoseResult = currentPose
         this.renderMode = mode
+        
+        // Apply jitter reduction filter to Pose landmarks
+        applyPoseFilter(currentPose)
+        
         invalidate()
+    }
+
+    private fun applyPoseFilter(result: PoseLandmarkerResult?) {
+        val landmarks = result?.landmarks()?.getOrNull(0)
+        if (landmarks == null) {
+            filteredPoseLandmarks = null
+            return
+        }
+
+        val timestamp = System.currentTimeMillis()
+        filteredPoseLandmarks = landmarks.mapIndexed { index, landmark ->
+            // Apply filtering to ALL Pose landmarks (including face/head points in Pose)
+            // minCutoff=2.0 and beta=0.005 provides even weaker filtering than before
+            val filterX = poseFiltersX.getOrPut(index) { OneEuroFilter(minCutoff = 2.0, beta = 0.005) }
+            val filterY = poseFiltersY.getOrPut(index) { OneEuroFilter(minCutoff = 2.0, beta = 0.005) }
+            
+            PointF(
+                filterX.filter(landmark.x().toDouble(), timestamp).toFloat(),
+                filterY.filter(landmark.y().toDouble(), timestamp).toFloat()
+            )
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -82,8 +112,6 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
             canvas.save()
             canvas.clipPath(facePath)
             
-            // 왜곡(회전, 틸팅, 비정상적 확대)을 방지하기 위해 정방형 사각형 영역에 드로잉
-            // TransformFragment의 크롭 로직과 동일하게 1.5배 영역을 계산
             val minX = curFace.minOf { it.x() }
             val maxX = curFace.maxOf { it.x() }
             val minY = curFace.minOf { it.y() }
@@ -105,17 +133,18 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
                 offsetY + (top + size) * drawH
             )
             
-            // 행렬 변환 없이 사각형 영역에 그대로 그려 회전과 틸팅을 제거함
             canvas.drawBitmap(stylized, null, destRect, paint)
             canvas.restore()
         }
 
-        // 랜드마크 점 그리기 (초록색) - 기존 로직 유지
+        // Draw Face landmarks (NO filtering applied here as requested)
         curFace?.forEach {
             canvas.drawCircle(offX + it.x() * drawW, offsetY + it.y() * drawH, 3f, pointPaint)
         }
-        currentPoseResult?.landmarks()?.getOrNull(0)?.forEach {
-            canvas.drawCircle(offX + it.x() * drawW, offsetY + it.y() * drawH, 3f, pointPaint)
+        
+        // Draw filtered Pose landmarks (filtered slightly)
+        filteredPoseLandmarks?.forEach {
+            canvas.drawCircle(offX + it.x * drawW, offsetY + it.y * drawH, 3f, pointPaint)
         }
 
         canvas.restore()

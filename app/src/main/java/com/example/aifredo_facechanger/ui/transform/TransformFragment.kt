@@ -158,24 +158,39 @@ class TransformFragment : Fragment() {
 
                 if (compatList.isDelegateSupportedOnThisDevice) {
                     try {
+                        // FP16 GAN 모델 호환성을 위해 정밀도 손실 허용 및 추론 속도 우선 설정
+                        val gpuOptions = GpuDelegate.Options().apply {
+                            setPrecisionLossAllowed(true)
+                            setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
+                        }
+                        gpuDelegate = GpuDelegate(gpuOptions)
+                        
                         val options = Interpreter.Options().apply {
-                            val delegateOptions = compatList.bestOptionsForThisDevice
-                            gpuDelegate = GpuDelegate(delegateOptions)
                             addDelegate(gpuDelegate)
+                            setNumThreads(4)
                         }
                         tfliteInterpreter = Interpreter(modelBuffer, options)
-                        addLog("TFLite Loaded (GPU)")
+                        addLog("TFLite Stylizer: GPU Mode")
                     } catch (e: Exception) {
+                        Log.e(TAG, "GPU Delegate fail forGAN: ${e.message}")
                         gpuDelegate?.close()
                         gpuDelegate = null
-                        val cpuOptions = Interpreter.Options().setNumThreads(4)
+                        
+                        // GPU 실패 시 XNNPACK을 활성화한 CPU 모드로 전환 (일반 CPU보다 훨씬 빠름)
+                        val cpuOptions = Interpreter.Options().apply {
+                            setNumThreads(4)
+                            setUseXNNPACK(true)
+                        }
                         tfliteInterpreter = Interpreter(modelBuffer, cpuOptions)
-                        addLog("TFLite Loaded (CPU Fallback)")
+                        addLog("TFLite Stylizer: CPU+XNNPACK (GPU Incompatible)")
                     }
                 } else {
-                    val cpuOptions = Interpreter.Options().setNumThreads(4)
+                    val cpuOptions = Interpreter.Options().apply {
+                        setNumThreads(4)
+                        setUseXNNPACK(true)
+                    }
                     tfliteInterpreter = Interpreter(modelBuffer, cpuOptions)
-                    addLog("TFLite Loaded (CPU)")
+                    addLog("TFLite Stylizer: CPU Mode")
                 }
 
                 tfliteInterpreter?.let {
@@ -190,7 +205,7 @@ class TransformFragment : Fragment() {
             try {
                 faceStylizer = FaceStylizer.createFromOptions(context, FaceStylizer.FaceStylizerOptions.builder()
                     .setBaseOptions(BaseOptions.builder().setDelegate(Delegate.GPU).setModelAssetPath(modelName).build()).build())
-                addLog("MediaPipe Stylizer Ready")
+                addLog("MediaPipe Stylizer Ready (GPU)")
             } catch (e: Exception) {
                 addLog("Stylizer Error: ${e.message}")
             }
@@ -268,7 +283,6 @@ class TransformFragment : Fragment() {
                         tfliteInterpreter!!.run(inputBuffer, outputBuffer)
                         outputBuffer.rewind()
                         
-                        // [최적화] Bulk copy: ByteBuffer에서 FloatArray로 한 번에 복사
                         val pixelCount = outW * outH
                         val outputFloats = FloatArray(pixelCount * 3)
                         outputBuffer.asFloatBuffer().get(outputFloats)
