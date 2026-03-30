@@ -27,6 +27,7 @@ import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
+import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
@@ -55,12 +56,13 @@ class TransformFragment : Fragment() {
     
     private var faceLandmarker: FaceLandmarker? = null
     private var poseLandmarker: PoseLandmarker? = null
-    private var faceStylizer: FaceStylizer? = null
-    private var tfliteInterpreter: Interpreter? = null
+    
+    @Volatile private var faceStylizer: FaceStylizer? = null
+    @Volatile private var tfliteInterpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
     
-    private var modelInputWidth = 512
-    private var modelInputHeight = 512
+    private var modelInputWidth = 256
+    private var modelInputHeight = 256
 
     @Volatile private var lastStylizedBitmap: Bitmap? = null
     @Volatile private var lastStylizedFaceResult: FaceLandmarkerResult? = null 
@@ -101,6 +103,10 @@ class TransformFragment : Fragment() {
         val sharedPref = activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE)
         currentModelPref = sharedPref?.getString("selected_model", "CartoonGAN_Default") ?: "CartoonGAN_Default"
         renderMode = sharedPref?.getString("render_mode", "Face_Only") ?: "Face_Only"
+        
+        val resolution = sharedPref?.getInt("model_resolution", 256) ?: 256
+        modelInputWidth = resolution
+        modelInputHeight = resolution
     }
 
     private fun setupAnalyzers() {
@@ -141,73 +147,124 @@ class TransformFragment : Fragment() {
     }
 
     private fun setupStylizer() {
-        val context = context ?: return
-        faceStylizer?.close(); tfliteInterpreter?.close(); gpuDelegate?.close()
-        faceStylizer = null; tfliteInterpreter = null; gpuDelegate = null
+        val context = context?.applicationContext ?: return
+        val modelPref = currentModelPref
+        val resW = modelInputWidth
+        val resH = modelInputHeight
 
-        val modelName = when (currentModelPref) {
-            "MediaPipe_Default" -> "face_stylizer.task"
-            "CartoonGAN_Default" -> "whitebox_cartoon_gan_int8.tflite"
-            else -> "whitebox_cartoon_gan_int8.tflite"
-        }
-        
-        if (modelName.endsWith(".tflite")) {
+        stylizerExecutor?.execute {
             try {
-                val modelBuffer = loadModelFile(context.assets, modelName)
-                val compatList = CompatibilityList()
+                val modelName = when (modelPref) {
+                    "MediaPipe_Default" -> "face_stylizer.task"
+                    "CartoonGAN_Default" -> "whitebox_cartoon_gan_int8.tflite"
+                    else -> "whitebox_cartoon_gan_int8.tflite"
+                }
 
-                if (compatList.isDelegateSupportedOnThisDevice) {
-                    try {
-                        // FP16/INT8 GAN 모델 호환성을 위해 정밀도 손실 허용 및 추론 속도 우선 설정
-                        val gpuOptions = GpuDelegate.Options().apply {
-                            setPrecisionLossAllowed(true)
-                            setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
-                        }
-                        gpuDelegate = GpuDelegate(gpuOptions)
+                if (modelName.endsWith(".tflite")) {
+                    val modelBuffer = loadModelFile(context.assets, modelName)
+                    
+                    var finalInterpreter: Interpreter? = null
+                    var finalDelegate: GpuDelegate? = null
 
-                        val options = Interpreter.Options().apply {
-                            addDelegate(gpuDelegate)
-                            setNumThreads(4)
+                    // Helper to try initialization with specific settings
+                    fun tryInit(useGpu: Boolean, useResize: Boolean): Boolean {
+                        var tempInterpreter: Interpreter? = null
+                        var tempDelegate: GpuDelegate? = null
+                        try {
+                            val options = Interpreter.Options().apply {
+                                if (useGpu) {
+                                    val gpuOptions = GpuDelegate.Options().apply {
+                                        setPrecisionLossAllowed(true)
+                                        setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
+                                    }
+                                    tempDelegate = GpuDelegate(gpuOptions)
+                                    addDelegate(tempDelegate)
+                                } else {
+                                    setNumThreads(4)
+                                    setUseXNNPACK(true)
+                                }
+                            }
+                            tempInterpreter = Interpreter(modelBuffer, options)
+                            if (useResize) {
+                                tempInterpreter.resizeInput(0, intArrayOf(1, resH, resW, 3))
+                            }
+                            // This is where the broadcastable error usually happens if resize is unsupported
+                            tempInterpreter.allocateTensors()
+                            
+                            finalInterpreter = tempInterpreter
+                            finalDelegate = tempDelegate
+                            return true
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Init failed (gpu=$useGpu, resize=$useResize): ${e.message}")
+                            tempInterpreter?.close()
+                            tempDelegate?.close()
+                            return false
                         }
-                        tfliteInterpreter = Interpreter(modelBuffer, options)
-                        addLog("TFLite Stylizer: GPU Mode")
-                    } catch (e: Exception) {
-                        Log.e(TAG, "GPU Delegate fail forGAN: ${e.message}")
-                        gpuDelegate?.close()
-                        gpuDelegate = null
+                    }
 
-                        // GPU 실패 시 XNNPACK을 활성화한 CPU 모드로 전환 (일반 CPU보다 훨씬 빠름)
-                        val cpuOptions = Interpreter.Options().apply {
-                            setNumThreads(4)
-                            setUseXNNPACK(true)
+                    val gpuSupported = CompatibilityList().isDelegateSupportedOnThisDevice
+                    var success = false
+                    
+                    // 1. Try GPU + Desired Resize (e.g. 256x256)
+                    if (gpuSupported) success = tryInit(true, true)
+                    
+                    // 2. Try CPU + Desired Resize
+                    if (!success) success = tryInit(false, true)
+                    
+                    // 3. Try GPU + Model Default (Fallback if resize is unsupported by model architecture)
+                    if (!success && gpuSupported) success = tryInit(true, false)
+                    
+                    // 4. Try CPU + Model Default
+                    if (!success) success = tryInit(false, false)
+
+                    if (success && finalInterpreter != null) {
+                        val interp = finalInterpreter!!
+                        val shape = interp.getInputTensor(0).shape()
+                        if (shape.size >= 4) {
+                            modelInputHeight = shape[1]
+                            modelInputWidth = shape[2]
                         }
-                        tfliteInterpreter = Interpreter(modelBuffer, cpuOptions)
-                        addLog("TFLite Stylizer: CPU+XNNPACK (GPU Incompatible)")
+                        
+                        val oldInt = tfliteInterpreter
+                        val oldDel = gpuDelegate
+                        val oldStylizer = faceStylizer
+                        
+                        tfliteInterpreter = interp
+                        gpuDelegate = finalDelegate
+                        faceStylizer = null
+                        
+                        oldInt?.close()
+                        oldDel?.close()
+                        oldStylizer?.close()
+                        
+                        activity?.runOnUiThread { 
+                            addLog("TFLite Ready (${if (finalDelegate != null) "GPU" else "CPU"}) ${modelInputWidth}x${modelInputHeight}") 
+                        }
+                    } else {
+                        Log.e(TAG, "All Stylizer initialization attempts failed")
+                        activity?.runOnUiThread { addLog("Stylizer Load Error") }
                     }
                 } else {
-                    val cpuOptions = Interpreter.Options().apply {
-                        setNumThreads(4)
-                        setUseXNNPACK(true)
-                    }
-                    tfliteInterpreter = Interpreter(modelBuffer, cpuOptions)
-                    addLog("TFLite Stylizer: CPU Mode")
-                }
-
-                tfliteInterpreter?.let {
-                    val inputShape = it.getInputTensor(0).shape()
-                    modelInputHeight = inputShape[1]
-                    modelInputWidth = inputShape[2]
+                    val newStylizer = FaceStylizer.createFromOptions(context, FaceStylizer.FaceStylizerOptions.builder()
+                        .setBaseOptions(BaseOptions.builder().setDelegate(Delegate.GPU).setModelAssetPath(modelName).build()).build())
+                    
+                    val oldInt = tfliteInterpreter
+                    val oldDel = gpuDelegate
+                    val oldStylizer = faceStylizer
+                    
+                    faceStylizer = newStylizer
+                    tfliteInterpreter = null
+                    gpuDelegate = null
+                    
+                    oldInt?.close()
+                    oldDel?.close()
+                    oldStylizer?.close()
+                    
+                    activity?.runOnUiThread { addLog("MediaPipe Ready (GPU)") }
                 }
             } catch (e: Exception) {
-                addLog("Model Error: ${e.message}")
-            }
-        } else {
-            try {
-                faceStylizer = FaceStylizer.createFromOptions(context, FaceStylizer.FaceStylizerOptions.builder()
-                    .setBaseOptions(BaseOptions.builder().setDelegate(Delegate.GPU).setModelAssetPath(modelName).build()).build())
-                addLog("MediaPipe Stylizer Ready (GPU)")
-            } catch (e: Exception) {
-                addLog("Stylizer Error: ${e.message}")
+                Log.e(TAG, "Setup Stylizer Error", e)
+                activity?.runOnUiThread { addLog("Model Error: ${e.message}") }
             }
         }
     }
@@ -241,58 +298,103 @@ class TransformFragment : Fragment() {
             try {
                 if (targetBmp.isRecycled) return@execute
                 val faceLandmarks = faceRes.faceLandmarks()[0]
-                val minX = faceLandmarks.minOf { it.x() }
-                val maxX = faceLandmarks.maxOf { it.x() }
-                val minY = faceLandmarks.minOf { it.y() }
-                val maxY = faceLandmarks.maxOf { it.y() }
+                val imgW = targetBmp.width
+                val imgH = targetBmp.height
+
+                val minX = faceLandmarks.minOf { it.x() } * imgW
+                val maxX = faceLandmarks.maxOf { it.x() } * imgW
+                val minY = faceLandmarks.minOf { it.y() } * imgH
+                val maxY = faceLandmarks.maxOf { it.y() } * imgH
                 
-                val width = maxX - minX
-                val height = maxY - minY
-                val centerX = minX + width / 2f
-                val centerY = minY + height / 2f
-                val size = max(width, height) * 1.5f
+                val widthPx = maxX - minX
+                val heightPx = maxY - minY
+                val centerXPx = (minX + maxX) / 2f
+                val centerYPx = (minY + maxY) / 2f
                 
-                val left = ((centerX - size / 2f) * targetBmp.width).toInt().coerceIn(0, targetBmp.width - 1)
-                val top = ((centerY - size / 2f) * targetBmp.height).toInt().coerceIn(0, targetBmp.height - 1)
-                val rectW = (size * targetBmp.width).toInt().coerceAtMost(targetBmp.width - left)
-                val rectH = (size * targetBmp.height).toInt().coerceAtMost(targetBmp.height - top)
+                // Use square crop for better model results and consistent alignment
+                val sizePx = (max(widthPx, heightPx) * 1.5f).toInt()
+                val leftPx = (centerXPx - sizePx / 2f).toInt()
+                val topPx = (centerYPx - sizePx / 2f).toInt()
                 
-                if (rectW > 10 && rectH > 10) {
-                    val faceBmp = Bitmap.createBitmap(targetBmp, left, top, rectW, rectH)
-                    val scaledFace = Bitmap.createScaledBitmap(faceBmp, modelInputWidth, modelInputHeight, true)
-                    faceBmp.recycle()
+                if (sizePx > 10) {
+                    // Create a square bitmap and draw the target area into it.
+                    // This handles cases where the crop area goes outside the original image.
+                    val faceBmp = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+                    val canvas = Canvas(faceBmp)
+                    canvas.drawBitmap(targetBmp, -leftPx.toFloat(), -topPx.toFloat(), null)
                     
-                    if (tfliteInterpreter != null) {
-                        val tensorImage = TensorImage.fromBitmap(scaledFace)
+                    val interpreter = tfliteInterpreter
+                    val stylizer = faceStylizer
+
+                    if (interpreter != null) {
+                        val inputTensor = interpreter.getInputTensor(0)
+                        val inputShape = inputTensor.shape()
+                        val h = inputShape[1]
+                        val w = inputShape[2]
+                        
+                        val scaledFace = Bitmap.createScaledBitmap(faceBmp, w, h, true)
+                        faceBmp.recycle()
+                        
+                        val tensorImage = TensorImage(inputTensor.dataType())
+                        tensorImage.load(scaledFace)
+                        
                         val processor = ImageProcessor.Builder()
-                            .add(ResizeOp(modelInputHeight, modelInputWidth, ResizeOp.ResizeMethod.BILINEAR))
-                            .add(NormalizeOp(0f, 255f)).build()
+                            .add(ResizeOp(h, w, ResizeOp.ResizeMethod.BILINEAR))
+                            .apply {
+                                if (inputTensor.dataType() == DataType.FLOAT32) {
+                                    add(NormalizeOp(0f, 255f))
+                                }
+                            }
+                            .build()
+                        
                         val inputBuffer = processor.process(tensorImage).buffer
                         
-                        val outputTensor = tfliteInterpreter!!.getOutputTensor(0)
-                        val outputShape = outputTensor.shape()
-                        val outH = outputShape[1]
-                        val outW = outputShape[2]
-
-                        if (modelOutputBuffer == null || modelOutputBuffer!!.capacity() != outH * outW * 3 * 4) {
-                            modelOutputBuffer = java.nio.ByteBuffer.allocateDirect(outH * outW * 3 * 4).order(java.nio.ByteOrder.nativeOrder())
+                        val outputTensor = interpreter.getOutputTensor(0)
+                        val outShape = outputTensor.shape()
+                        val outH = outShape[1]
+                        val outW = outShape[2]
+                        val isFloatOutput = outputTensor.dataType() == DataType.FLOAT32
+                        
+                        val bufferSize = outH * outW * 3 * (if (isFloatOutput) 4 else 1)
+                        if (modelOutputBuffer == null || modelOutputBuffer!!.capacity() != bufferSize) {
+                            modelOutputBuffer = java.nio.ByteBuffer.allocateDirect(bufferSize).order(java.nio.ByteOrder.nativeOrder())
                         }
                         val outputBuffer = modelOutputBuffer!!
                         outputBuffer.rewind()
 
-                        tfliteInterpreter!!.run(inputBuffer, outputBuffer)
+                        try {
+                            interpreter.run(inputBuffer, outputBuffer)
+                        } catch (e: IllegalArgumentException) {
+                            if (e.message?.contains("Tensor hasn't been allocated") == true) {
+                                Log.w(TAG, "Late allocation triggered")
+                                interpreter.allocateTensors()
+                                outputBuffer.rewind()
+                                interpreter.run(inputBuffer, outputBuffer)
+                            } else throw e
+                        }
+                        
                         outputBuffer.rewind()
-                        
                         val pixelCount = outW * outH
-                        val outputFloats = FloatArray(pixelCount * 3)
-                        outputBuffer.asFloatBuffer().get(outputFloats)
-                        
                         val pixels = IntArray(pixelCount)
-                        for (i in 0 until pixelCount) {
-                            val r = (outputFloats[i * 3] * 255).toInt().coerceIn(0, 255)
-                            val g = (outputFloats[i * 3 + 1] * 255).toInt().coerceIn(0, 255)
-                            val b = (outputFloats[i * 3 + 2] * 255).toInt().coerceIn(0, 255)
-                            pixels[i] = -0x1000000 or (r shl 16) or (g shl 8) or b
+                        
+                        if (isFloatOutput) {
+                            val outputFloats = FloatArray(pixelCount * 3)
+                            outputBuffer.asFloatBuffer().get(outputFloats)
+                            for (i in 0 until pixelCount) {
+                                val r = (outputFloats[i * 3] * 255).toInt().coerceIn(0, 255)
+                                val g = (outputFloats[i * 3 + 1] * 255).toInt().coerceIn(0, 255)
+                                val b = (outputFloats[i * 3 + 2] * 255).toInt().coerceIn(0, 255)
+                                pixels[i] = -0x1000000 or (r shl 16) or (g shl 8) or b
+                            }
+                        } else {
+                            val outputBytes = ByteArray(pixelCount * 3)
+                            outputBuffer.get(outputBytes)
+                            for (i in 0 until pixelCount) {
+                                val r = outputBytes[i * 3].toInt() and 0xFF
+                                val g = outputBytes[i * 3 + 1].toInt() and 0xFF
+                                val b = outputBytes[i * 3 + 2].toInt() and 0xFF
+                                pixels[i] = -0x1000000 or (r shl 16) or (g shl 8) or b
+                            }
                         }
                         
                         val resultBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
@@ -304,8 +406,12 @@ class TransformFragment : Fragment() {
                             lastStylizedFaceResult = faceRes
                             old?.recycle()
                         }
-                    } else if (faceStylizer != null) {
-                        val stylizedResult = faceStylizer?.stylize(BitmapImageBuilder(scaledFace).build())
+                        scaledFace.recycle()
+                    } else if (stylizer != null) {
+                        val scaledFace = Bitmap.createScaledBitmap(faceBmp, modelInputWidth, modelInputHeight, true)
+                        faceBmp.recycle()
+                        
+                        val stylizedResult = stylizer.stylize(BitmapImageBuilder(scaledFace).build())
                         stylizedResult?.stylizedImage()?.let { optional ->
                             if (optional.isPresent) {
                                 val stylizedBmp = BitmapExtractor.extract(optional.get())
@@ -317,8 +423,10 @@ class TransformFragment : Fragment() {
                                 }
                             }
                         }
+                        scaledFace.recycle()
+                    } else {
+                        faceBmp.recycle()
                     }
-                    scaledFace.recycle()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Stylize Error", e)
@@ -331,7 +439,7 @@ class TransformFragment : Fragment() {
     private fun analyzeFrame(imageProxy: ImageProxy) {
         if (!isAdded || _binding == null) { imageProxy.close(); return }
         
-        if (inputBitmap == null || inputBitmap!!.width != imageProxy.width || inputBitmap!!.height != imageProxy.height) {
+        if (inputBitmap == null || inputBitmap!!.width != imageProxy.width || imageProxy.height != inputBitmap!!.height) {
             inputBitmap?.recycle()
             inputBitmap = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
         }

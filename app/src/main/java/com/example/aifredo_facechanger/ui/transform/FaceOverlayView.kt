@@ -60,7 +60,6 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
         val timestamp = System.currentTimeMillis()
         filteredPoseLandmarks = landmarks.mapIndexed { index, landmark ->
             // Apply filtering to ALL Pose landmarks (including face/head points in Pose)
-            // minCutoff=2.0 and beta=0.005 provides even weaker filtering than before
             val filterX = poseFiltersX.getOrPut(index) { OneEuroFilter(minCutoff = 2.0, beta = 0.005) }
             val filterY = poseFiltersY.getOrPut(index) { OneEuroFilter(minCutoff = 2.0, beta = 0.005) }
 
@@ -112,37 +111,37 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
             canvas.save()
             canvas.clipPath(facePath)
 
-            val minX = curFace.minOf { it.x() }
-            val maxX = curFace.maxOf { it.x() }
-            val minY = curFace.minOf { it.y() }
-            val maxY = curFace.maxOf { it.y() }
+            // Calculate exact crop area in pixels, matching TransformFragment's logic
+            val minXPx = curFace.minOf { it.x() } * drawW
+            val maxXPx = curFace.maxOf { it.x() } * drawW
+            val minYPx = curFace.minOf { it.y() } * drawH
+            val maxYPx = curFace.maxOf { it.y() } * drawH
 
-            val centerX = (minX + maxX) / 2f
-            val centerY = (minY + maxY) / 2f
-            val fW = maxX - minX
-            val fH = maxY - minY
-            val size = max(fW, fH) * 1.5f
+            val widthPx = maxXPx - minXPx
+            val heightPx = maxYPx - minYPx
+            val centerXPx = (minXPx + maxXPx) / 2f
+            val centerYPx = (minYPx + maxYPx) / 2f
             
-            val left = centerX - size / 2f
-            val top = centerY - size / 2f
+            // Use same 1.5x square logic as TransformFragment to maintain alignment
+            val sizePx = max(widthPx, heightPx) * 1.5f
             
             val destRect = RectF(
-                offX + left * drawW,
-                offsetY + top * drawH,
-                offX + (left + size) * drawW,
-                offsetY + (top + size) * drawH
+                offX + centerXPx - sizePx / 2f,
+                offsetY + centerYPx - sizePx / 2f,
+                offX + centerXPx + sizePx / 2f,
+                offsetY + centerYPx + sizePx / 2f
             )
             
             canvas.drawBitmap(stylized, null, destRect, paint)
             canvas.restore()
         }
 
-        // Draw Face landmarks (NO filtering applied here as requested)
+        // Draw Face landmarks
         curFace?.forEach {
             canvas.drawCircle(offX + it.x() * drawW, offsetY + it.y() * drawH, 3f, pointPaint)
         }
 
-        // Draw filtered Pose landmarks (filtered slightly)
+        // Draw Pose landmarks
         filteredPoseLandmarks?.forEach {
             canvas.drawCircle(offX + it.x * drawW, offsetY + it.y * drawH, 3f, pointPaint)
         }

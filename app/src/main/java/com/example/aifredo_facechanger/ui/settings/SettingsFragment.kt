@@ -69,6 +69,26 @@ class SettingsFragment : Fragment() {
                 apply()
             }
         }
+
+        // --- Resolution Selection ---
+        val currentResolution = sharedPref.getInt("model_resolution", 256)
+        when (currentResolution) {
+            256 -> binding.radioRes256.isChecked = true
+            512 -> binding.radioRes512.isChecked = true
+            else -> binding.radioRes256.isChecked = true
+        }
+
+        binding.radioGroupResolution.setOnCheckedChangeListener { _, checkedId ->
+            val selectedRes = when (checkedId) {
+                R.id.radio_res_256 -> 256
+                R.id.radio_res_512 -> 512
+                else -> 256
+            }
+            with(sharedPref.edit()) {
+                putInt("model_resolution", selectedRes)
+                apply()
+            }
+        }
     }
 
     override fun onDestroyView() {
