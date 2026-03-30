@@ -43,10 +43,10 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
         this.currentFaceResult = currentFace
         this.currentPoseResult = currentPose
         this.renderMode = mode
-        
+
         // Apply jitter reduction filter to Pose landmarks
         applyPoseFilter(currentPose)
-        
+
         invalidate()
     }
 
@@ -63,7 +63,7 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
             // minCutoff=2.0 and beta=0.005 provides even weaker filtering than before
             val filterX = poseFiltersX.getOrPut(index) { OneEuroFilter(minCutoff = 2.0, beta = 0.005) }
             val filterY = poseFiltersY.getOrPut(index) { OneEuroFilter(minCutoff = 2.0, beta = 0.005) }
-            
+
             PointF(
                 filterX.filter(landmark.x().toDouble(), timestamp).toFloat(),
                 filterY.filter(landmark.y().toDouble(), timestamp).toFloat()
@@ -111,12 +111,12 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
 
             canvas.save()
             canvas.clipPath(facePath)
-            
+
             val minX = curFace.minOf { it.x() }
             val maxX = curFace.maxOf { it.x() }
             val minY = curFace.minOf { it.y() }
             val maxY = curFace.maxOf { it.y() }
-            
+
             val centerX = (minX + maxX) / 2f
             val centerY = (minY + maxY) / 2f
             val fW = maxX - minX
@@ -141,7 +141,7 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
         curFace?.forEach {
             canvas.drawCircle(offX + it.x() * drawW, offsetY + it.y() * drawH, 3f, pointPaint)
         }
-        
+
         // Draw filtered Pose landmarks (filtered slightly)
         filteredPoseLandmarks?.forEach {
             canvas.drawCircle(offX + it.x * drawW, offsetY + it.y * drawH, 3f, pointPaint)
