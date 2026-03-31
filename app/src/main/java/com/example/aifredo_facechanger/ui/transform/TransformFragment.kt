@@ -67,8 +67,10 @@ class TransformFragment : Fragment() {
     private var modelInputHeight = 256
 
     @Volatile private var lastStylizedBitmap: Bitmap? = null
-    @Volatile private var lastStylizedFaceResult: FaceLandmarkerResult? = null 
-    @Volatile private var lastStylizedPoseResult: PoseLandmarkerResult? = null
+    @Volatile private var lastStylizedCenterX = 0f
+    @Volatile private var lastStylizedCenterY = 0f
+    @Volatile private var lastStylizedSize = 0f
+    
     private var inputBitmap: Bitmap? = null
     private var modelOutputBuffer: java.nio.ByteBuffer? = null
 
@@ -80,20 +82,15 @@ class TransformFragment : Fragment() {
     private enum class LandmarkMode { FACE, POSE }
     private var currentLandmarkMode = LandmarkMode.POSE
     private var modeSwitchCounter = 0
-    private var lastModeSwitchTime = 0L
-    
-    private val BASE_TO_FACE_THRESHOLD = 5
-    private val BASE_TO_POSE_THRESHOLD = 10
-    private var adaptiveToFaceThreshold = BASE_TO_FACE_THRESHOLD
-    private var adaptiveToPoseThreshold = BASE_TO_POSE_THRESHOLD
+    private val MODE_SWITCH_THRESHOLD = 5
 
     private var lastValidFaceResult: FaceLandmarkerResult? = null
     private var faceLossCounter = 0
-    private val FACE_HOLD_MAX_FRAMES = 5
+    private val FACE_HOLD_MAX_FRAMES = 10
 
-    private val filterX = OneEuroFilter(minCutoff = 0.5, beta = 0.015)
-    private val filterY = OneEuroFilter(minCutoff = 0.5, beta = 0.015)
-    private val filterSize = OneEuroFilter(minCutoff = 0.2, beta = 0.01)
+    private val filterX = OneEuroFilter(minCutoff = 0.2, beta = 0.01)
+    private val filterY = OneEuroFilter(minCutoff = 0.2, beta = 0.01)
+    private val filterSize = OneEuroFilter(minCutoff = 0.1, beta = 0.005)
 
     @Volatile private var filteredCenterX = 0f
     @Volatile private var filteredCenterY = 0f
@@ -310,29 +307,26 @@ class TransformFragment : Fragment() {
             faceLossCounter++
         }
 
+        // Mode switching
         if (currentLandmarkMode == LandmarkMode.POSE) {
             if (faceDetected) {
                 modeSwitchCounter++
-                if (modeSwitchCounter >= adaptiveToFaceThreshold) {
+                if (modeSwitchCounter >= MODE_SWITCH_THRESHOLD) {
                     currentLandmarkMode = LandmarkMode.FACE
                     modeSwitchCounter = 0
                 }
-            } else {
-                modeSwitchCounter = 0
-            }
-        } else { 
+            } else modeSwitchCounter = 0
+        } else {
             if (!faceDetected) {
                 modeSwitchCounter++
-                if (modeSwitchCounter >= adaptiveToPoseThreshold) {
+                if (modeSwitchCounter >= MODE_SWITCH_THRESHOLD) {
                     currentLandmarkMode = LandmarkMode.POSE
                     modeSwitchCounter = 0
                 }
-            } else {
-                modeSwitchCounter = 0
-            }
+            } else modeSwitchCounter = 0
         }
 
-        val (rawX, rawY, rawS) = calculateRawCropConsistent(result, lastPoseResult, capturedBmp.width, capturedBmp.height)
+        val (rawX, rawY, rawS) = calculateStableCrop(result, lastPoseResult, capturedBmp.width, capturedBmp.height)
         
         if (rawS > 0) {
             filteredCenterX = filterX.filter(rawX.toDouble(), ts).toFloat()
@@ -341,77 +335,74 @@ class TransformFragment : Fragment() {
         }
 
         if (!isStylizing && filteredSize > 10) {
-            performStylization(capturedBmp, result, lastPoseResult)
+            performStylization(capturedBmp, filteredCenterX, filteredCenterY, filteredSize)
         }
     }
 
-    private fun calculateRawCropConsistent(faceRes: FaceLandmarkerResult?, poseRes: PoseLandmarkerResult?, imgW: Int, imgH: Int): Triple<Float, Float, Float> {
+    private fun calculateStableCrop(faceRes: FaceLandmarkerResult?, poseRes: PoseLandmarkerResult?, imgW: Int, imgH: Int): Triple<Float, Float, Float> {
         var rawX = 0f
         var rawY = 0f
         var rawS = 0f
         
         val faceDetected = faceRes?.faceLandmarks()?.isNotEmpty() == true
-        val poseDetected = poseRes?.landmarks()?.isNotEmpty() == true
         val holdFace = !faceDetected && lastValidFaceResult != null && faceLossCounter <= FACE_HOLD_MAX_FRAMES
+        val poseDetected = poseRes?.landmarks()?.isNotEmpty() == true
 
         if (faceDetected || holdFace) {
             val res = if (faceDetected) faceRes!! else lastValidFaceResult!!
-            val faceLandmarks = res.faceLandmarks()[0]
-            val minY = faceLandmarks.minOf { it.y() } * imgH
-            val maxY = faceLandmarks.maxOf { it.y() } * imgH
-            val faceH = maxY - minY
+            val landmarks = res.faceLandmarks()[0]
             
-            rawX = faceLandmarks.map { it.x() }.average().toFloat() * imgW
-            rawY = faceLandmarks.map { it.y() }.average().toFloat() * imgH
+            // Average of inner eye corners and nose tip for stable center
+            val nose = landmarks[4]
+            val leftEye = landmarks[33]
+            val rightEye = landmarks[263]
             
-            // Reduced upward offset (0.15 -> 0.08) to prevent top clipping
-            rawY -= (faceH * 0.08f) 
+            rawX = (leftEye.x() + rightEye.x() + nose.x()) / 3f * imgW
+            rawY = (leftEye.y() + rightEye.y() + nose.y()) / 3f * imgH
             
-            // Reduced scale (2.2 -> 1.8) to focus more on the face
-            rawS = faceH * 1.8f 
+            val minY = landmarks.minOf { it.y() }
+            val maxY = landmarks.maxOf { it.y() }
+            val faceH = (maxY - minY) * imgH
+            
+            rawY -= (faceH * 0.10f) // Center slightly above eyes
+            rawS = faceH * 1.85f // Tuned scale
         } 
         else if (poseDetected) {
             val landmarks = poseRes!!.landmarks()[0]
-            val headPart = landmarks.take(11) 
-            val lShoulder = landmarks[11]
-            val rShoulder = landmarks[12]
+            val headPoints = landmarks.take(11) 
             
-            val shoulderWidth = sqrt(Math.pow((rShoulder.x() - lShoulder.x()).toDouble(), 2.0) + 
-                                    Math.pow((rShoulder.y() - lShoulder.y()).toDouble(), 2.0)).toFloat()
-            
-            val headWidthEstimated = shoulderWidth * 0.40f // Slightly reduced
-            val detectedW = headPart.maxOf { it.x() } - headPart.minOf { it.x() }
-            val detectedH = headPart.maxOf { it.y() } - headPart.minOf { it.y() }
-            val finalHeadW = max(max(detectedW, detectedH), headWidthEstimated)
-            
-            val headPoints = headPart.filterIndexed { i, _ -> i in 0..8 }
             rawX = headPoints.map { it.x() }.average().toFloat() * imgW
             rawY = headPoints.map { it.y() }.average().toFloat() * imgH
             
-            rawY -= (finalHeadW * 0.10f * imgH) // Reduced offset
-            rawS = finalHeadW * 1.8f * max(imgW, imgH) // Reduced scale
+            val lShoulder = landmarks[11]
+            val rShoulder = landmarks[12]
+            val shoulderDist = sqrt(Math.pow((rShoulder.x() - lShoulder.x()).toDouble(), 2.0) + 
+                                    Math.pow((rShoulder.y() - lShoulder.y()).toDouble(), 2.0)).toFloat()
+            
+            val headHeightEst = shoulderDist * 0.45f * imgH
+            rawY -= (headHeightEst * 0.15f)
+            rawS = headHeightEst * 1.9f 
         }
         
         return Triple(rawX, rawY, rawS)
     }
 
-    private fun performStylization(targetBmp: Bitmap, faceRes: FaceLandmarkerResult?, poseRes: PoseLandmarkerResult?) {
+    private fun performStylization(targetBmp: Bitmap, centerXPx: Float, centerYPx: Float, sizePx: Float) {
         isStylizing = true
-        val centerXPx = filteredCenterX
-        val centerYPx = filteredCenterY
-        val sizePx = filteredSize
-
         stylizerExecutor?.execute {
             try {
-                if (targetBmp.isRecycled || sizePx <= 10) return@execute
+                if (targetBmp.isRecycled || sizePx <= 1) return@execute
 
-                val leftPx = (centerXPx - sizePx / 2f).toInt()
-                val topPx = (centerYPx - sizePx / 2f).toInt()
                 val intSize = sizePx.toInt().coerceAtLeast(1)
+                val left = centerXPx - sizePx / 2f
+                val top = centerYPx - sizePx / 2f
                 
                 val faceBmp = Bitmap.createBitmap(intSize, intSize, Bitmap.Config.ARGB_8888)
                 val canvas = Canvas(faceBmp)
-                canvas.drawBitmap(targetBmp, -leftPx.toFloat(), -topPx.toFloat(), null)
+                // Use Matrix translation to handle edge cropping correctly without stretching
+                val matrix = Matrix()
+                matrix.postTranslate(-left, -top)
+                canvas.drawBitmap(targetBmp, matrix, null)
                 
                 val interpreter = tfliteInterpreter
                 val stylizer = faceStylizer
@@ -473,8 +464,12 @@ class TransformFragment : Fragment() {
                     resultBmp.setPixels(pixels, 0, outW, 0, 0, outW, outH)
                     
                     activity?.runOnUiThread { 
-                        val old = lastStylizedBitmap; lastStylizedBitmap = resultBmp 
-                        lastStylizedFaceResult = faceRes; lastStylizedPoseResult = poseRes; old?.recycle()
+                        val old = lastStylizedBitmap
+                        lastStylizedBitmap = resultBmp 
+                        lastStylizedCenterX = centerXPx
+                        lastStylizedCenterY = centerYPx
+                        lastStylizedSize = sizePx
+                        old?.recycle()
                     }
                     scaledFace.recycle()
                 } else if (stylizer != null) {
@@ -485,8 +480,12 @@ class TransformFragment : Fragment() {
                         if (optional.isPresent) {
                             val stylizedBmp = BitmapExtractor.extract(optional.get())
                             activity?.runOnUiThread {
-                                val old = lastStylizedBitmap; lastStylizedBitmap = stylizedBmp
-                                lastStylizedFaceResult = faceRes; lastStylizedPoseResult = poseRes; old?.recycle()
+                                val old = lastStylizedBitmap
+                                lastStylizedBitmap = stylizedBmp
+                                lastStylizedCenterX = centerXPx
+                                lastStylizedCenterY = centerYPx
+                                lastStylizedSize = sizePx
+                                old?.recycle()
                             }
                         }
                     }
@@ -507,17 +506,32 @@ class TransformFragment : Fragment() {
         val newFrame = Bitmap.createBitmap(inputBitmap!!, 0, 0, inputBitmap!!.width, inputBitmap!!.height, matrix, true)
         val ts = System.currentTimeMillis()
         frameCache[ts] = newFrame
+        
         val iterator = frameCache.keys.iterator()
         while (iterator.hasNext()) {
             val key = iterator.next()
-            if (key < ts - 400) { frameCache[key]?.let { if (!it.isRecycled) it.recycle() }; iterator.remove() }
+            if (key < ts - 500) { 
+                frameCache[key]?.let { if (!it.isRecycled) it.recycle() }
+                iterator.remove() 
+            }
         }
+
         val mpImage = BitmapImageBuilder(newFrame).build()
         try { faceLandmarker?.detectAsync(mpImage, ts) } catch (e: Exception) {}
         try { poseLandmarker?.detectAsync(mpImage, ts) } catch (e: Exception) {}
+
         activity?.runOnUiThread {
             if (_binding != null) {
-                binding.faceOverlay.updateFrame(newFrame, lastStylizedBitmap, lastStylizedFaceResult, lastStylizedPoseResult, lastFaceResult, lastPoseResult, renderMode, currentLandmarkMode == LandmarkMode.FACE)
+                binding.faceOverlay.updateFrame(
+                    original = newFrame, 
+                    stylized = lastStylizedBitmap, 
+                    sCenter = PointF(lastStylizedCenterX, lastStylizedCenterY),
+                    sSize = lastStylizedSize,
+                    curFace = lastFaceResult, 
+                    curPose = lastPoseResult,
+                    mode = renderMode,
+                    isFaceActive = currentLandmarkMode == LandmarkMode.FACE
+                )
             }
         }
         imageProxy.close()
@@ -534,7 +548,10 @@ class TransformFragment : Fragment() {
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .setTargetResolution(Size(640, 480))
                 .build().also { it.setAnalyzer(cameraExecutor!!) { proxy -> analyzeFrame(proxy) } }
-            try { cameraProvider.unbindAll(); cameraProvider.bindToLifecycle(viewLifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, preview, imageAnalyzer) } catch (e: Exception) { }
+            try { 
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(viewLifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, preview, imageAnalyzer) 
+            } catch (e: Exception) { }
         }, ContextCompat.getMainExecutor(context))
     }
 
