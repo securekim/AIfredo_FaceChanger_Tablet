@@ -62,8 +62,8 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
 
         val timestamp = System.currentTimeMillis()
         filteredPoseLandmarks = landmarks.mapIndexed { index, landmark ->
-            val filterX = poseFiltersX.getOrPut(index) { OneEuroFilter(minCutoff = 2.0, beta = 0.005) }
-            val filterY = poseFiltersY.getOrPut(index) { OneEuroFilter(minCutoff = 2.0, beta = 0.005) }
+            val filterX = poseFiltersX.getOrPut(index) { OneEuroFilter(minCutoff = 10.0, beta = 1.0) }
+            val filterY = poseFiltersY.getOrPut(index) { OneEuroFilter(minCutoff = 10.0, beta = 1.0) }
 
             PointF(
                 filterX.filter(landmark.x().toDouble(), timestamp).toFloat(),
@@ -112,15 +112,19 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
         val poseLandmarks = currentPoseResult?.landmarks()?.getOrNull(0)
 
         if (stylized != null && !stylized.isRecycled) {
-            var minXPx = 0f; var maxXPx = 0f; var minYPx = 0f; var maxYPx = 0f
+            var centerXPx = 0f; var centerYPx = 0f; var sizePx = 0f
             var found = false
 
             if (curFace != null) {
-                minXPx = curFace.minOf { it.x() } * drawW
-                maxXPx = curFace.maxOf { it.x() } * drawW
-                minYPx = curFace.minOf { it.y() } * drawH
-                maxYPx = curFace.maxOf { it.y() } * drawH
+                val minXPx = curFace.minOf { it.x() } * drawW
+                val maxXPx = curFace.maxOf { it.x() } * drawW
+                val minYPx = curFace.minOf { it.y() } * drawH
+                val maxYPx = curFace.maxOf { it.y() } * drawH
                 
+                centerXPx = (minXPx + maxXPx) / 2f
+                centerYPx = (minYPx + maxYPx) / 2f
+                sizePx = max(maxXPx - minXPx, maxYPx - minYPx) * 1.5f
+
                 // Detailed path clipping
                 facePath.reset()
                 for (i in faceOutlineIndices.indices) {
@@ -134,52 +138,41 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
                 canvas.clipPath(facePath)
                 found = true
             } else if (poseLandmarks != null) {
-                // Estimation using Pose: Nose(0), Eyes(1-6), Ears(7-8), Shoulders(11-12)
+                // Estimation using Pose
                 val headPart = poseLandmarks.take(11)
-                val nose = poseLandmarks[0]
                 val lShoulder = poseLandmarks[11]
                 val rShoulder = poseLandmarks[12]
                 
                 val shoulderWidth = sqrt(Math.pow((rShoulder.x() - lShoulder.x()).toDouble(), 2.0) + 
                                         Math.pow((rShoulder.y() - lShoulder.y()).toDouble(), 2.0)).toFloat()
                 
-                // Estimate head size based on shoulder width (avg ratio ~0.5-0.7)
-                val estimatedHeadSize = shoulderWidth * 0.6f
+                val estimatedHeadSize = shoulderWidth * 0.9f
                 
-                minXPx = headPart.minOf { it.x() } * drawW
-                maxXPx = headPart.maxOf { it.x() } * drawW
-                minYPx = headPart.minOf { it.y() } * drawH
-                maxYPx = headPart.maxOf { it.y() } * drawH
+                val detectedMinXPx = headPart.minOf { it.x() } * drawW
+                val detectedMaxXPx = headPart.maxOf { it.x() } * drawW
+                val detectedMinYPx = headPart.minOf { it.y() } * drawH
+                val detectedMaxYPx = headPart.maxOf { it.y() } * drawH
                 
-                // Expand the box to ensure it covers the head
-                val detectedW = (maxXPx - minXPx) / drawW
-                val detectedH = (maxYPx - minYPx) / drawH
+                val detectedWPx = (detectedMaxXPx - detectedMinXPx)
+                val finalHeadWidthPx = max(detectedWPx, estimatedHeadSize * drawW)
                 
-                val finalHeadWidth = max(detectedW, estimatedHeadSize)
-                val centerXPose = (minXPx + maxXPx) / 2f / drawW
-                val centerYPose = (minYPx + maxYPx) / 2f / drawH
+                centerXPx = (detectedMinXPx + detectedMaxXPx) / 2f
+                centerYPx = (detectedMinYPx + detectedMaxYPx) / 2f
                 
-                minXPx = (centerXPose - finalHeadWidth * 0.6f) * drawW
-                maxXPx = (centerXPose + finalHeadWidth * 0.6f) * drawW
-                minYPx = (centerYPose - finalHeadWidth * 0.8f) * drawH
-                maxYPx = (centerYPose + finalHeadWidth * 0.4f) * drawH
+                // Adjust vertical position to cover the forehead more
+                centerYPx -= (finalHeadWidthPx * 0.25f) 
 
-                // Oval clipping for pose-based estimation
+                sizePx = finalHeadWidthPx * 1.8f
+
+                // Circular clipping
                 facePath.reset()
-                val ovalRect = RectF(offX + minXPx, offsetY + minYPx, offX + maxXPx, offsetY + maxYPx)
-                facePath.addOval(ovalRect, Path.Direction.CW)
+                facePath.addCircle(offX + centerXPx, offsetY + centerYPx, sizePx * 0.45f, Path.Direction.CW)
                 canvas.save()
                 canvas.clipPath(facePath)
                 found = true
             }
 
             if (found) {
-                val widthPx = maxXPx - minXPx
-                val heightPx = maxYPx - minYPx
-                val centerXPx = (minXPx + maxXPx) / 2f
-                val centerYPx = (minYPx + maxYPx) / 2f
-                val sizePx = max(widthPx, heightPx) * 1.5f
-                
                 val destRect = RectF(
                     offX + centerXPx - sizePx / 2f,
                     offsetY + centerYPx - sizePx / 2f,
