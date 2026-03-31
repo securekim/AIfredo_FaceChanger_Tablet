@@ -55,14 +55,14 @@ class TransformFragment : Fragment() {
     private var cameraExecutor: ExecutorService? = null
     private var stylizerExecutor: ExecutorService? = null
     private var backgroundExecutor: ExecutorService? = null
-    
+
     private var faceLandmarker: FaceLandmarker? = null
     private var poseLandmarker: PoseLandmarker? = null
-    
+
     @Volatile private var faceStylizer: FaceStylizer? = null
     @Volatile private var tfliteInterpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
-    
+
     private var modelInputWidth = 256
     private var modelInputHeight = 256
 
@@ -70,7 +70,7 @@ class TransformFragment : Fragment() {
     @Volatile private var lastStylizedCenterX = 0f
     @Volatile private var lastStylizedCenterY = 0f
     @Volatile private var lastStylizedSize = 0f
-    
+
     private var inputBitmap: Bitmap? = null
     private var modelOutputBuffer: java.nio.ByteBuffer? = null
 
@@ -126,7 +126,7 @@ class TransformFragment : Fragment() {
         val sharedPref = activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE)
         currentModelPref = sharedPref?.getString("selected_model", "CartoonGAN_Default") ?: "CartoonGAN_Default"
         renderMode = sharedPref?.getString("render_mode", "Face_Only") ?: "Face_Only"
-        
+
         val resolution = sharedPref?.getInt("model_resolution", 256) ?: 256
         modelInputWidth = resolution
         modelInputHeight = resolution
@@ -135,8 +135,8 @@ class TransformFragment : Fragment() {
     private fun setupAnalyzers() {
         val context = context ?: return
         addLog("Initializing AI...")
-        
-        val faceModel = "face_landmarker.task" 
+
+        val faceModel = "face_landmarker.task"
         val poseModel = "pose_landmarker_lite.task"
 
         try {
@@ -345,44 +345,56 @@ class TransformFragment : Fragment() {
         var rawY = 0f
         var rawS = 0f
         
+        // [수정] 배율을 3f -> 2.45f로 하향
+        val TARGET_MULTIPLIER = 2.45f
+        
         val faceDetected = faceRes?.faceLandmarks()?.isNotEmpty() == true
         val holdFace = !faceDetected && lastValidFaceResult != null && faceLossCounter <= FACE_HOLD_MAX_FRAMES
         val poseDetected = poseRes?.landmarks()?.isNotEmpty() == true
+
+        // 1. Pose 기반 헤드 사이즈 사전 계산 (어깨 너비 기준)
+        var poseBasedSize = 0f
+        var headHeightEst = 0f
+        if (poseDetected) {
+            val pLandmarks = poseRes!!.landmarks()[0]
+            val lShoulder = pLandmarks[11]
+            val rShoulder = pLandmarks[12]
+            val shoulderDist = sqrt(Math.pow((rShoulder.x() - lShoulder.x()).toDouble(), 2.0) + 
+                                    Math.pow((rShoulder.y() - lShoulder.y()).toDouble(), 2.0)).toFloat()
+            headHeightEst = shoulderDist * 0.40f * imgH // 한국인 평균 비율에 맞게 소폭 조정
+            poseBasedSize = headHeightEst * TARGET_MULTIPLIER
+        }
 
         if (faceDetected || holdFace) {
             val res = if (faceDetected) faceRes!! else lastValidFaceResult!!
             val landmarks = res.faceLandmarks()[0]
             
-            // Average of inner eye corners and nose tip for stable center
-            val nose = landmarks[4]
-            val leftEye = landmarks[33]
-            val rightEye = landmarks[263]
-            
-            rawX = (leftEye.x() + rightEye.x() + nose.x()) / 3f * imgW
-            rawY = (leftEye.y() + rightEye.y() + nose.y()) / 3f * imgH
-            
+            // [수정] 눈/코 대신 전체 랜드마크의 경계 중앙값을 사용하여 측면 시 귀/턱 누락 방지
+            val minX = landmarks.minOf { it.x() }
+            val maxX = landmarks.maxOf { it.x() }
             val minY = landmarks.minOf { it.y() }
             val maxY = landmarks.maxOf { it.y() }
+            
+            rawX = (minX + maxX) / 2f * imgW
+            rawY = (minY + maxY) / 2f * imgH
+            
             val faceH = (maxY - minY) * imgH
             
-            rawY -= (faceH * 0.10f) // Center slightly above eyes
-            rawS = faceH * 1.85f // Tuned scale
+            // [핵심] Pose 데이터가 있다면 Pose 크기에 맞추고, 없다면 Face 기준 배율 적용
+            rawS = if (poseBasedSize > 0) poseBasedSize else faceH * TARGET_MULTIPLIER
+            
+            // [수정] 턱 확보를 위해 상향 오프셋을 0.05로 유지
+            rawY -= (faceH * 0.05f)
         } 
         else if (poseDetected) {
             val landmarks = poseRes!!.landmarks()[0]
-            val headPoints = landmarks.take(11) 
+            val headPoints = landmarks.take(11) // 0~10: nose, eyes, ears
             
             rawX = headPoints.map { it.x() }.average().toFloat() * imgW
             rawY = headPoints.map { it.y() }.average().toFloat() * imgH
             
-            val lShoulder = landmarks[11]
-            val rShoulder = landmarks[12]
-            val shoulderDist = sqrt(Math.pow((rShoulder.x() - lShoulder.x()).toDouble(), 2.0) + 
-                                    Math.pow((rShoulder.y() - lShoulder.y()).toDouble(), 2.0)).toFloat()
-            
-            val headHeightEst = shoulderDist * 0.45f * imgH
-            rawY -= (headHeightEst * 0.15f)
-            rawS = headHeightEst * 1.9f 
+            rawY -= (headHeightEst * 0.08f)
+            rawS = poseBasedSize
         }
         
         return Triple(rawX, rawY, rawS)
@@ -397,7 +409,7 @@ class TransformFragment : Fragment() {
                 val intSize = sizePx.toInt().coerceAtLeast(1)
                 val left = centerXPx - sizePx / 2f
                 val top = centerYPx - sizePx / 2f
-                
+
                 val faceBmp = Bitmap.createBitmap(intSize, intSize, Bitmap.Config.ARGB_8888)
                 val canvas = Canvas(faceBmp)
                 // Use Matrix translation to handle edge cropping correctly without stretching
@@ -413,20 +425,20 @@ class TransformFragment : Fragment() {
                     val h = inputTensor.shape()[1]; val w = inputTensor.shape()[2]
                     val scaledFace = Bitmap.createScaledBitmap(faceBmp, w, h, true)
                     faceBmp.recycle()
-                    
+
                     val tensorImage = TensorImage(inputTensor.dataType())
                     tensorImage.load(scaledFace)
-                    
+
                     val processor = ImageProcessor.Builder()
                         .add(ResizeOp(h, w, ResizeOp.ResizeMethod.BILINEAR))
                         .apply { if (inputTensor.dataType() == DataType.FLOAT32) add(NormalizeOp(0f, 255f)) }
                         .build()
-                    
+
                     val inputBuffer = processor.process(tensorImage).buffer
                     val outputTensor = interpreter.getOutputTensor(0)
                     val outH = outputTensor.shape()[1]; val outW = outputTensor.shape()[2]
                     val isFloatOutput = outputTensor.dataType() == DataType.FLOAT32
-                    
+
                     val bufferSize = outH * outW * 3 * (if (isFloatOutput) 4 else 1)
                     if (modelOutputBuffer == null || modelOutputBuffer!!.capacity() != bufferSize) {
                         modelOutputBuffer = java.nio.ByteBuffer.allocateDirect(bufferSize).order(java.nio.ByteOrder.nativeOrder())
@@ -437,10 +449,10 @@ class TransformFragment : Fragment() {
                     try { interpreter.run(inputBuffer, outputBuffer) } catch (e: Exception) {
                         interpreter.allocateTensors(); outputBuffer.rewind(); interpreter.run(inputBuffer, outputBuffer)
                     }
-                    
+
                     outputBuffer.rewind()
                     val pixelCount = outW * outH; val pixels = IntArray(pixelCount)
-                    
+
                     if (isFloatOutput) {
                         val outputFloats = FloatArray(pixelCount * 3)
                         outputBuffer.asFloatBuffer().get(outputFloats)
@@ -460,13 +472,13 @@ class TransformFragment : Fragment() {
                             pixels[i] = -0x1000000 or (r shl 16) or (g shl 8) or b
                         }
                     }
-                    
+
                     val resultBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
                     resultBmp.setPixels(pixels, 0, outW, 0, 0, outW, outH)
                     
-                    activity?.runOnUiThread { 
+                    activity?.runOnUiThread {
                         val old = lastStylizedBitmap
-                        lastStylizedBitmap = resultBmp 
+                        lastStylizedBitmap = resultBmp
                         lastStylizedCenterX = centerXPx
                         lastStylizedCenterY = centerYPx
                         lastStylizedSize = sizePx
@@ -507,13 +519,13 @@ class TransformFragment : Fragment() {
         val newFrame = Bitmap.createBitmap(inputBitmap!!, 0, 0, inputBitmap!!.width, inputBitmap!!.height, matrix, true)
         val ts = System.currentTimeMillis()
         frameCache[ts] = newFrame
-        
+
         val iterator = frameCache.keys.iterator()
         while (iterator.hasNext()) {
             val key = iterator.next()
-            if (key < ts - 500) { 
+            if (key < ts - 500) {
                 frameCache[key]?.let { if (!it.isRecycled) it.recycle() }
-                iterator.remove() 
+                iterator.remove()
             }
         }
 
@@ -524,12 +536,12 @@ class TransformFragment : Fragment() {
         activity?.runOnUiThread {
             if (_binding != null) {
                 binding.faceOverlay.updateFrame(
-                    original = newFrame, 
-                    stylized = lastStylizedBitmap, 
+                    original = newFrame,
+                    stylized = lastStylizedBitmap,
                     // [핵심 수정] 딜레이가 있는 lastStylizedCenterX 대신 실시간 filteredCenterX 사용
                     sCenter = PointF(filteredCenterX, filteredCenterY),
                     sSize = filteredSize,
-                    curFace = lastFaceResult, 
+                    curFace = lastFaceResult,
                     curPose = lastPoseResult,
                     mode = renderMode,
                     isFaceActive = currentLandmarkMode == LandmarkMode.FACE
@@ -550,9 +562,9 @@ class TransformFragment : Fragment() {
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .setTargetResolution(Size(640, 480))
                 .build().also { it.setAnalyzer(cameraExecutor!!) { proxy -> analyzeFrame(proxy) } }
-            try { 
+            try {
                 cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(viewLifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, preview, imageAnalyzer) 
+                cameraProvider.bindToLifecycle(viewLifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, preview, imageAnalyzer)
             } catch (e: Exception) { }
         }, ContextCompat.getMainExecutor(context))
     }
