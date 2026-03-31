@@ -88,9 +88,10 @@ class TransformFragment : Fragment() {
     private var faceLossCounter = 0
     private val FACE_HOLD_MAX_FRAMES = 10
 
-    private val filterX = OneEuroFilter(minCutoff = 0.2, beta = 0.01)
-    private val filterY = OneEuroFilter(minCutoff = 0.2, beta = 0.01)
-    private val filterSize = OneEuroFilter(minCutoff = 0.1, beta = 0.005)
+    // 필터 반응성 대폭 상향
+    private val filterX = OneEuroFilter(minCutoff = 1.0, beta = 0.02)
+    private val filterY = OneEuroFilter(minCutoff = 1.0, beta = 0.02)
+    private val filterSize = OneEuroFilter(minCutoff = 0.5, beta = 0.01)
 
     @Volatile private var filteredCenterX = 0f
     @Volatile private var filteredCenterY = 0f
@@ -525,8 +526,9 @@ class TransformFragment : Fragment() {
                 binding.faceOverlay.updateFrame(
                     original = newFrame, 
                     stylized = lastStylizedBitmap, 
-                    sCenter = PointF(lastStylizedCenterX, lastStylizedCenterY),
-                    sSize = lastStylizedSize,
+                    // [핵심 수정] 딜레이가 있는 lastStylizedCenterX 대신 실시간 filteredCenterX 사용
+                    sCenter = PointF(filteredCenterX, filteredCenterY),
+                    sSize = filteredSize,
                     curFace = lastFaceResult, 
                     curPose = lastPoseResult,
                     mode = renderMode,
