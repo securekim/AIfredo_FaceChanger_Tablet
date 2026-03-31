@@ -87,15 +87,26 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
         canvas.save()
         canvas.clipRect(0f, 0f, midX, height.toFloat())
         canvas.drawBitmap(bitmap, null, RectF(offsetX, offsetY, offsetX + drawW, offsetY + drawH), paint)
+        
+        val curFace = currentFaceResult?.faceLandmarks()?.getOrNull(0)
+        
+        // Draw Face landmarks on the LEFT (Original) side
+        curFace?.forEach {
+            canvas.drawCircle(offsetX + it.x() * drawW, offsetY + it.y() * drawH, 3f, pointPaint)
+        }
+
+        // Draw Pose landmarks on the LEFT (Original) side
+        filteredPoseLandmarks?.forEach {
+            canvas.drawCircle(offsetX + it.x * drawW, offsetY + it.y * drawH, 3f, pointPaint)
+        }
         canvas.restore()
 
-        // 2. 우측
+        // 2. 우측 (합성 결과물)
         canvas.save()
         canvas.clipRect(midX, 0f, width.toFloat(), height.toFloat())
         canvas.drawBitmap(bitmap, null, RectF(offX, offsetY, offX + drawW, offsetY + drawH), paint)
 
         val stylized = stylizedFullFrame
-        val curFace = currentFaceResult?.faceLandmarks()?.getOrNull(0)
 
         if (stylized != null && !stylized.isRecycled && curFace != null) {
             // 얼굴 윤곽 패스 생성
@@ -135,18 +146,8 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
             canvas.drawBitmap(stylized, null, destRect, paint)
             canvas.restore()
         }
-
-        // Draw Face landmarks
-        curFace?.forEach {
-            canvas.drawCircle(offX + it.x() * drawW, offsetY + it.y() * drawH, 3f, pointPaint)
-        }
-
-        // Draw Pose landmarks
-        filteredPoseLandmarks?.forEach {
-            canvas.drawCircle(offX + it.x * drawW, offsetY + it.y * drawH, 3f, pointPaint)
-        }
-
         canvas.restore()
+
         canvas.drawLine(midX, 0f, midX, height.toFloat(), Paint().apply { color = Color.WHITE; strokeWidth = 3f })
     }
 }
