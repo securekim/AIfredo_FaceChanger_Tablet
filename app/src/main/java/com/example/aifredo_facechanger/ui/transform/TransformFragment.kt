@@ -86,6 +86,7 @@ class TransformFragment : Fragment() {
     private var lastValidFaceResult: FaceLandmarkerResult? = null
     private var faceLossCounter = 0
     private val FACE_HOLD_MAX_FRAMES = 10
+    private var lastFacePresent = false
 
     // 필터 반응성 대폭 상향
     private val filterX = OneEuroFilter(minCutoff = 1.0, beta = 0.02)
@@ -307,6 +308,14 @@ class TransformFragment : Fragment() {
         val capturedBmp = frameCache[ts] ?: return
         
         val faceDetected = result.faceLandmarks().isNotEmpty()
+        val currentlyPresent = faceDetected || (faceLossCounter <= FACE_HOLD_MAX_FRAMES && lastValidFaceResult != null)
+        
+        // 화면을 벗어났다가 다시 들어왔을 때 이전의 (잘못된/잘린) 비트맵이 보이는 것을 방지
+        if (!lastFacePresent && currentlyPresent) {
+            lastStylizedBitmap = null
+        }
+        lastFacePresent = currentlyPresent
+
         if (faceDetected) {
             lastValidFaceResult = result
             faceLossCounter = 0
@@ -412,9 +421,17 @@ class TransformFragment : Fragment() {
 
                 val faceBmp = Bitmap.createBitmap(intSize, intSize, Bitmap.Config.ARGB_8888)
                 val canvas = Canvas(faceBmp)
-                val matrix = Matrix()
-                matrix.postTranslate(-left, -top)
-                canvas.drawBitmap(targetBmp, matrix, null)
+                
+                // Edge clamping to avoid black areas when the face is near the edge
+                val shader = BitmapShader(targetBmp, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+                val paint = Paint().apply {
+                    isFilterBitmap = true
+                    setShader(shader)
+                }
+                val m = Matrix()
+                m.postTranslate(-left, -top)
+                shader.setLocalMatrix(m)
+                canvas.drawRect(0f, 0f, intSize.toFloat(), intSize.toFloat(), paint)
                 
                 val interpreter = tfliteInterpreter
                 val stylizer = faceStylizer
