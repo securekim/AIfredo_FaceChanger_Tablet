@@ -44,7 +44,6 @@ import java.util.*
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import kotlin.math.max
 import kotlin.math.sqrt
 
 class TransformFragment : Fragment() {
@@ -98,7 +97,7 @@ class TransformFragment : Fragment() {
     @Volatile private var filteredSize = 0f
 
     private val TAG = "AIfredo_Transform"
-    private var currentModelPref: String = "CartoonGAN_Default"
+    private var currentModelPref: String = "AnimeGAN_Hayao"
     private var renderMode: String = "Face_Only"
     private val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
@@ -124,7 +123,8 @@ class TransformFragment : Fragment() {
 
     private fun loadSettings() {
         val sharedPref = activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE)
-        currentModelPref = sharedPref?.getString("selected_model", "CartoonGAN_Default") ?: "CartoonGAN_Default"
+        // 기본값을 AnimeGAN_Hayao로 강제 설정 (저장된 값이 없으면)
+        currentModelPref = sharedPref?.getString("selected_model", "AnimeGAN_Hayao") ?: "AnimeGAN_Hayao"
         renderMode = sharedPref?.getString("render_mode", "Face_Only") ?: "Face_Only"
 
         val resolution = sharedPref?.getInt("model_resolution", 256) ?: 256
@@ -177,11 +177,16 @@ class TransformFragment : Fragment() {
 
         stylizerExecutor?.execute {
             try {
+                // 선택된 프리셋에 따른 파일명 매핑
                 val modelName = when (modelPref) {
+                    "AnimeGAN_Hayao" -> "animeganv2_hayao_256x256_float16_quant.tflite"
+                    "AnimeGAN_Paprika" -> "animeganv2_paprika_256x256_float16_quant.tflite"
                     "MediaPipe_Default" -> "face_stylizer.task"
                     "CartoonGAN_Default" -> "whitebox_cartoon_gan_int8.tflite"
-                    else -> "whitebox_cartoon_gan_int8.tflite"
+                    else -> "animeganv2_hayao_256x256_float16_quant.tflite"
                 }
+
+                activity?.runOnUiThread { addLog("Loading Model: $modelName") }
 
                 if (modelName.endsWith(".tflite")) {
                     val modelBuffer = loadModelFile(context.assets, modelName)
@@ -226,10 +231,10 @@ class TransformFragment : Fragment() {
                     val gpuSupported = CompatibilityList().isDelegateSupportedOnThisDevice
                     var success = false
                     
-                    if (gpuSupported) success = tryInit(true, true)
-                    if (!success) success = tryInit(false, true)
-                    if (!success && gpuSupported) success = tryInit(true, false)
-                    if (!success) success = tryInit(false, false)
+                    if (gpuSupported) success = tryInit(useGpu = true, useResize = true)
+                    if (!success) success = tryInit(useGpu = false, useResize = true)
+                    if (!success && gpuSupported) success = tryInit(useGpu = true, useResize = false)
+                    if (!success) success = tryInit(useGpu = false, useResize = false)
 
                     if (success && finalInterpreter != null) {
                         val interp = finalInterpreter!!
@@ -252,13 +257,14 @@ class TransformFragment : Fragment() {
                         oldStylizer?.close()
                         
                         activity?.runOnUiThread { 
-                            addLog("TFLite Ready (${if (finalDelegate != null) "GPU" else "CPU"}) ${modelInputWidth}x${modelInputHeight}") 
+                            addLog("TFLite Ready [$modelName] (${if (finalDelegate != null) "GPU" else "CPU"}) ${modelInputWidth}x${modelInputHeight}") 
                         }
                     } else {
                         Log.e(TAG, "All Stylizer initialization attempts failed")
-                        activity?.runOnUiThread { addLog("Stylizer Load Error") }
+                        activity?.runOnUiThread { addLog("Stylizer Load Error: $modelName") }
                     }
                 } else {
+                    // MediaPipe Task 로드
                     val newStylizer = FaceStylizer.createFromOptions(context, FaceStylizer.FaceStylizerOptions.builder()
                         .setBaseOptions(BaseOptions.builder().setDelegate(Delegate.GPU).setModelAssetPath(modelName).build()).build())
                     
@@ -274,7 +280,7 @@ class TransformFragment : Fragment() {
                     oldDel?.close()
                     oldStylizer?.close()
                     
-                    activity?.runOnUiThread { addLog("MediaPipe Ready (GPU)") }
+                    activity?.runOnUiThread { addLog("MediaPipe Ready [$modelName] (GPU)") }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Setup Stylizer Error", e)
@@ -345,23 +351,21 @@ class TransformFragment : Fragment() {
         var rawY = 0f
         var rawS = 0f
         
-        // [수정] 배율을 3f -> 2.45f로 하향
         val TARGET_MULTIPLIER = 2.45f
         
         val faceDetected = faceRes?.faceLandmarks()?.isNotEmpty() == true
         val holdFace = !faceDetected && lastValidFaceResult != null && faceLossCounter <= FACE_HOLD_MAX_FRAMES
         val poseDetected = poseRes?.landmarks()?.isNotEmpty() == true
 
-        // 1. Pose 기반 헤드 사이즈 사전 계산 (어깨 너비 기준)
         var poseBasedSize = 0f
         var headHeightEst = 0f
         if (poseDetected) {
             val pLandmarks = poseRes!!.landmarks()[0]
             val lShoulder = pLandmarks[11]
             val rShoulder = pLandmarks[12]
-            val shoulderDist = sqrt(Math.pow((rShoulder.x() - lShoulder.x()).toDouble(), 2.0) + 
+            val shoulderDist = Math.sqrt(Math.pow((rShoulder.x() - lShoulder.x()).toDouble(), 2.0) + 
                                     Math.pow((rShoulder.y() - lShoulder.y()).toDouble(), 2.0)).toFloat()
-            headHeightEst = shoulderDist * 0.40f * imgH // 한국인 평균 비율에 맞게 소폭 조정
+            headHeightEst = shoulderDist * 0.40f * imgH
             poseBasedSize = headHeightEst * TARGET_MULTIPLIER
         }
 
@@ -369,7 +373,6 @@ class TransformFragment : Fragment() {
             val res = if (faceDetected) faceRes!! else lastValidFaceResult!!
             val landmarks = res.faceLandmarks()[0]
             
-            // [수정] 눈/코 대신 전체 랜드마크의 경계 중앙값을 사용하여 측면 시 귀/턱 누락 방지
             val minX = landmarks.minOf { it.x() }
             val maxX = landmarks.maxOf { it.x() }
             val minY = landmarks.minOf { it.y() }
@@ -380,15 +383,12 @@ class TransformFragment : Fragment() {
             
             val faceH = (maxY - minY) * imgH
             
-            // [핵심] Pose 데이터가 있다면 Pose 크기에 맞추고, 없다면 Face 기준 배율 적용
             rawS = if (poseBasedSize > 0) poseBasedSize else faceH * TARGET_MULTIPLIER
-            
-            // [수정] 턱 확보를 위해 상향 오프셋을 0.05로 유지
             rawY -= (faceH * 0.05f)
         } 
         else if (poseDetected) {
             val landmarks = poseRes!!.landmarks()[0]
-            val headPoints = landmarks.take(11) // 0~10: nose, eyes, ears
+            val headPoints = landmarks.take(11)
             
             rawX = headPoints.map { it.x() }.average().toFloat() * imgW
             rawY = headPoints.map { it.y() }.average().toFloat() * imgH
@@ -412,7 +412,6 @@ class TransformFragment : Fragment() {
 
                 val faceBmp = Bitmap.createBitmap(intSize, intSize, Bitmap.Config.ARGB_8888)
                 val canvas = Canvas(faceBmp)
-                // Use Matrix translation to handle edge cropping correctly without stretching
                 val matrix = Matrix()
                 matrix.postTranslate(-left, -top)
                 canvas.drawBitmap(targetBmp, matrix, null)
@@ -538,7 +537,6 @@ class TransformFragment : Fragment() {
                 binding.faceOverlay.updateFrame(
                     original = newFrame,
                     stylized = lastStylizedBitmap,
-                    // [핵심 수정] 딜레이가 있는 lastStylizedCenterX 대신 실시간 filteredCenterX 사용
                     sCenter = PointF(filteredCenterX, filteredCenterY),
                     sSize = filteredSize,
                     curFace = lastFaceResult,

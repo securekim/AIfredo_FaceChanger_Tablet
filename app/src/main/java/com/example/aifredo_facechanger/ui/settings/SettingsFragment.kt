@@ -29,20 +29,22 @@ class SettingsFragment : Fragment() {
         val sharedPref = activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE) ?: return
         
         // --- Model Selection ---
-        val currentModel = sharedPref.getString("selected_model", "MediaPipe_Default")
+        val currentModel = sharedPref.getString("selected_model", "AnimeGAN_Hayao")
         when (currentModel) {
+            "AnimeGAN_Hayao" -> binding.radioAnimeganHayao.isChecked = true
+            "AnimeGAN_Paprika" -> binding.radioAnimeganPaprika.isChecked = true
             "MediaPipe_Default" -> binding.radioMediapipeDefault.isChecked = true
-            "MediaPipe_AIfredo" -> binding.radioMediapipeAifredo.isChecked = true
             "CartoonGAN_Default" -> binding.radioCartoonganDefault.isChecked = true
-            else -> binding.radioMediapipeDefault.isChecked = true
+            else -> binding.radioAnimeganHayao.isChecked = true
         }
 
         binding.radioGroupModel.setOnCheckedChangeListener { _, checkedId ->
             val selectedModel = when (checkedId) {
+                R.id.radio_animegan_hayao -> "AnimeGAN_Hayao"
+                R.id.radio_animegan_paprika -> "AnimeGAN_Paprika"
                 R.id.radio_mediapipe_default -> "MediaPipe_Default"
-                R.id.radio_mediapipe_aifredo -> "MediaPipe_AIfredo"
                 R.id.radio_cartoongan_default -> "CartoonGAN_Default"
-                else -> "MediaPipe_Default"
+                else -> "AnimeGAN_Hayao"
             }
             with(sharedPref.edit()) {
                 putString("selected_model", selectedModel)
