@@ -100,6 +100,8 @@ class TransformFragment : Fragment() {
     private var currentModelPref: String = "AnimeGAN_Hayao"
     private var renderMode: String = "Face_Only"
     private var useFaceLandmarkPref: Boolean = true
+    private var faceDelegatePref: String = "CPU"
+    private var poseDelegatePref: String = "CPU"
     private val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
 
     private val requestPermissionLauncher = registerForActivityResult(
@@ -126,10 +128,16 @@ class TransformFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        // 설정이 바뀌었을 수 있으므로 다시 로드
         val oldModel = currentModelPref
+        val oldFaceLandmark = useFaceLandmarkPref
+        val oldFaceDelegate = faceDelegatePref
+        val oldPoseDelegate = poseDelegatePref
+        
         loadSettings()
-        if (oldModel != currentModelPref) {
+        
+        // 중요 설정 변경 시 재초기화
+        if (oldModel != currentModelPref || oldFaceLandmark != useFaceLandmarkPref || 
+            oldFaceDelegate != faceDelegatePref || oldPoseDelegate != poseDelegatePref) {
             backgroundExecutor?.execute { if (isAdded) setupAnalyzers() }
         }
     }
@@ -142,6 +150,8 @@ class TransformFragment : Fragment() {
         modelInputWidth = resolution
         modelInputHeight = resolution
         useFaceLandmarkPref = sharedPref?.getBoolean("use_face_landmark", true) ?: true
+        faceDelegatePref = sharedPref?.getString("face_delegate", "CPU") ?: "CPU"
+        poseDelegatePref = sharedPref?.getString("pose_delegate", "CPU") ?: "CPU"
     }
 
     private fun setupAnalyzers() {
@@ -149,11 +159,15 @@ class TransformFragment : Fragment() {
         activity?.runOnUiThread { addLog("--- SYSTEM INITIALIZING ---") }
         val faceModel = "face_landmarker.task"
         val poseModel = "pose_landmarker_lite.task"
+        
+        val faceDelegate = if (faceDelegatePref == "GPU") Delegate.GPU else Delegate.CPU
+        val poseDelegate = if (poseDelegatePref == "GPU") Delegate.GPU else Delegate.CPU
+
         try {
             faceLandmarker?.close()
             faceLandmarker = if (useFaceLandmarkPref) {
                 FaceLandmarker.createFromOptions(context, FaceLandmarker.FaceLandmarkerOptions.builder()
-                    .setBaseOptions(BaseOptions.builder().setDelegate(Delegate.CPU).setModelAssetPath(faceModel).build())
+                    .setBaseOptions(BaseOptions.builder().setDelegate(faceDelegate).setModelAssetPath(faceModel).build())
                     .setRunningMode(RunningMode.LIVE_STREAM)
                     .setResultListener { result, _ -> processLandmarkResult(result) }
                     .build())
@@ -163,7 +177,7 @@ class TransformFragment : Fragment() {
             
             poseLandmarker?.close()
             poseLandmarker = PoseLandmarker.createFromOptions(context, PoseLandmarker.PoseLandmarkerOptions.builder()
-                .setBaseOptions(BaseOptions.builder().setDelegate(Delegate.CPU).setModelAssetPath(poseModel).build())
+                .setBaseOptions(BaseOptions.builder().setDelegate(poseDelegate).setModelAssetPath(poseModel).build())
                 .setRunningMode(RunningMode.LIVE_STREAM)
                 .setResultListener { result, _ -> 
                     lastPoseResult = result
@@ -172,9 +186,8 @@ class TransformFragment : Fragment() {
                 .build())
             
             activity?.runOnUiThread { 
-                if (useFaceLandmarkPref) addLog("1. Face Landmarker : CPU 💻")
-                else addLog("1. Face Landmarker : DISABLED ❌")
-                addLog("2. Pose Landmarker : CPU 💻")
+                addLog("1. Face Landmarker : ${if (useFaceLandmarkPref) faceDelegatePref else "DISABLED"}")
+                addLog("2. Pose Landmarker : $poseDelegatePref")
             }
         } catch (e: Exception) { 
             activity?.runOnUiThread { addLog("Landmarker Error: ${e.message}") }
@@ -350,10 +363,9 @@ class TransformFragment : Fragment() {
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
         
-        // 1. Base color processing (Vibrant & High Contrast)
         val paint = Paint(Paint.FILTER_BITMAP_FLAG)
         val cm = ColorMatrix()
-        cm.setSaturation(1.6f) // 채도를 높여 화사하게
+        cm.setSaturation(1.6f)
         val contrast = 1.3f
         val brightness = -20f
         cm.postConcat(ColorMatrix(floatArrayOf(
@@ -364,19 +376,16 @@ class TransformFragment : Fragment() {
         )))
         paint.colorFilter = ColorMatrixColorFilter(cm)
 
-        // 2. Strong smoothing (Scale down by 8) - 면을 뭉개서 그림 같은 느낌 생성
         val scale = 8
         val scaled = Bitmap.createScaledBitmap(src, (w / scale).coerceAtLeast(1), (h / scale).coerceAtLeast(1), true)
         canvas.drawBitmap(scaled, null, Rect(0, 0, w, h), paint)
         scaled.recycle()
 
-        // 3. Drawing Outlines (The "Drawing" part) - 외곽선 추출
         val edgeBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val eCanvas = Canvas(edgeBmp)
         val ePaint = Paint()
         val gcm = ColorMatrix()
-        gcm.setSaturation(0f) // 흑백으로 변환
-        // 어두운 부분만 아주 강하게 남김 (안경, 눈 등)
+        gcm.setSaturation(0f)
         val edgeCont = 5f
         val edgeBright = -600f 
         gcm.postConcat(ColorMatrix(floatArrayOf(
@@ -388,10 +397,9 @@ class TransformFragment : Fragment() {
         ePaint.colorFilter = ColorMatrixColorFilter(gcm)
         eCanvas.drawBitmap(src, 0f, 0f, ePaint)
 
-        // 4. Multiply Edges onto the smoothed base - 추출된 선을 곱하기 모드로 합성
         paint.colorFilter = null
         paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.MULTIPLY)
-        paint.alpha = 200 // 선의 선명도 조절
+        paint.alpha = 200
         canvas.drawBitmap(edgeBmp, 0f, 0f, paint)
         
         edgeBmp.recycle()
@@ -512,7 +520,7 @@ class TransformFragment : Fragment() {
             if (_binding != null) {
                 binding.faceOverlay.updateFrame(
                     original = newFrame, stylized = lastStylizedBitmap, sCenter = PointF(filteredCenterX, filteredCenterY),
-                    sSize = filteredSize, curFace = lastFaceResult, curPose = lastPoseResult, mode = renderMode, isFaceActive = currentLandmarkMode == LandmarkMode.FACE
+                    sSize = filteredSize, curFace = lastFaceResult, curPose = lastPoseResult, mode = renderMode, isFaceActive = useFaceLandmarkPref
                 )
             }
         }

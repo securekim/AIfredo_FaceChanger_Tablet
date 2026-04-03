@@ -54,6 +54,21 @@ class SettingsFragment : Fragment() {
             }
         }
 
+        // --- Delegate Selection ---
+        val faceDelegate = sharedPref.getString("face_delegate", "CPU")
+        if (faceDelegate == "GPU") binding.radioFaceGpu.isChecked = true else binding.radioFaceCpu.isChecked = true
+        binding.radioGroupFaceDelegate.setOnCheckedChangeListener { _, checkedId ->
+            val selected = if (checkedId == R.id.radio_face_gpu) "GPU" else "CPU"
+            sharedPref.edit().putString("face_delegate", selected).apply()
+        }
+
+        val poseDelegate = sharedPref.getString("pose_delegate", "CPU")
+        if (poseDelegate == "GPU") binding.radioPoseGpu.isChecked = true else binding.radioPoseCpu.isChecked = true
+        binding.radioGroupPoseDelegate.setOnCheckedChangeListener { _, checkedId ->
+            val selected = if (checkedId == R.id.radio_pose_gpu) "GPU" else "CPU"
+            sharedPref.edit().putString("pose_delegate", selected).apply()
+        }
+
         // --- Rendering Mode Selection ---
         val currentRenderMode = sharedPref.getString("render_mode", "Face_Only")
         when (currentRenderMode) {
