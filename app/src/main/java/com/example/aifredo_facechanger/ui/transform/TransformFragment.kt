@@ -88,7 +88,8 @@ class TransformFragment : Fragment() {
 
     // Stability & Transition
     private var faceDetectionStartTime: Long = 0
-    private var transitionStartTime: Long = 0
+    private var lastTransitionUpdateTime: Long = 0
+    private var rawTransitionRatio: Float = 0f
     @Volatile private var currentCornerRatio: Float = 0f // Start from 0 (Circle)
 
     private val filterX = OneEuroFilter(minCutoff = 1.0, beta = 0.02)
@@ -172,7 +173,8 @@ class TransformFragment : Fragment() {
                 lastValidFaceResult = null
                 faceLossCounter = 0
                 faceDetectionStartTime = 0
-                transitionStartTime = 0
+                lastTransitionUpdateTime = 0
+                rawTransitionRatio = 0f
                 currentCornerRatio = 0f
             }
 
@@ -188,6 +190,11 @@ class TransformFragment : Fragment() {
                     .setResultListener { result, _ -> 
                         lastFaceResult = result
                         val currentTime = System.currentTimeMillis()
+                        
+                        val deltaTime = if (lastTransitionUpdateTime == 0L) 0L else currentTime - lastTransitionUpdateTime
+                        lastTransitionUpdateTime = currentTime
+                        val step = deltaTime / 100f // 0.1s duration
+
                         if (result.faceLandmarks().isNotEmpty()) {
                             lastValidFaceResult = result
                             faceLossCounter = 0
@@ -195,27 +202,21 @@ class TransformFragment : Fragment() {
                             if (faceDetectionStartTime == 0L) {
                                 faceDetectionStartTime = currentTime
                             } else if (currentTime - faceDetectionStartTime > 100L) {
-                                if (transitionStartTime == 0L) {
-                                    transitionStartTime = currentTime
-                                }
+                                // Stability reached, proceed with transition
+                                rawTransitionRatio = (rawTransitionRatio + step).coerceIn(0f, 1f)
                             }
                         } else {
                             faceLossCounter++
                             if (faceLossCounter > FACE_HOLD_MAX_FRAMES) {
                                 faceDetectionStartTime = 0
-                                transitionStartTime = 0
+                                // Slowly transition back to 0 (Pose)
+                                rawTransitionRatio = (rawTransitionRatio - step).coerceIn(0f, 1f)
                             }
                         }
                         
-                        // Calculate face shape transition: 0 (Circle) -> 1 (Precise Face)
-                        if (transitionStartTime > 0L) {
-                            val elapsed = currentTime - transitionStartTime
-                            // 0.5 second transition with Ease-In effect for "sucking in" feel
-                            val t = (elapsed / 100f).coerceIn(0f, 1f)
-                            currentCornerRatio = t * t * t // Cubic Ease-In
-                        } else {
-                            currentCornerRatio = 0f
-                        }
+                        // Apply Cubic Ease-In for "sucking in" feel
+                        val t = rawTransitionRatio
+                        currentCornerRatio = t * t * t 
                     }
                     .build())
             } else null
@@ -401,13 +402,19 @@ class TransformFragment : Fragment() {
         val ratio = currentCornerRatio
         
         return when {
-            (faceDetected || holdFace) && ratio > 0f -> {
-                if (poseDetected) {
+            ratio > 0f -> {
+                if (poseDetected && (faceDetected || holdFace)) {
                     Triple(
                         pX * (1 - ratio) + fX * ratio,
                         pY * (1 - ratio) + fY * ratio,
                         pS * (1 - ratio) + fS * ratio
                     )
+                } else if (faceDetected || holdFace) {
+                    Triple(fX, fY, fS)
+                } else if (poseDetected) {
+                    Triple(pX * (1 - ratio) + lastStylizedCenterX * ratio, 
+                           pY * (1 - ratio) + lastStylizedCenterY * ratio, 
+                           pS * (1 - ratio) + lastStylizedSize * ratio)
                 } else {
                     Triple(fX, fY, fS)
                 }
@@ -459,13 +466,10 @@ class TransformFragment : Fragment() {
                 val m = Matrix(); m.postTranslate(-left, -top); shader.setLocalMatrix(m)
                 canvas.drawRect(0f, 0f, intSize.toFloat(), intSize.toFloat(), paint)
                 
+                var resultBmp: Bitmap? = null
+                
                 if (currentModelPref == "SEMI_Filter") {
-                    val resultBmp = applySemiFilter(faceBmp); faceBmp.recycle()
-                    activity?.runOnUiThread {
-                        val old = lastStylizedBitmap; lastStylizedBitmap = resultBmp
-                        lastStylizedCenterX = centerXPx; lastStylizedCenterY = centerYPx; lastStylizedSize = sizePx
-                        old?.recycle()
-                    }
+                    resultBmp = applySemiFilter(faceBmp); faceBmp.recycle()
                 } else if (tfliteInterpreter != null) {
                     val interpreter = tfliteInterpreter!!
                     val inputTensor = interpreter.getInputTensor(0)
@@ -496,26 +500,23 @@ class TransformFragment : Fragment() {
                             pixels[i] = -0x1000000 or (r shl 16) or (g shl 8) or b
                         }
                     }
-                    val resultBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888); resultBmp.setPixels(pixels, 0, outW, 0, 0, outW, outH)
-                    activity?.runOnUiThread {
-                        val old = lastStylizedBitmap; lastStylizedBitmap = resultBmp
-                        lastStylizedCenterX = centerXPx; lastStylizedCenterY = centerYPx; lastStylizedSize = sizePx
-                        old?.recycle()
-                    }
+                    resultBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888); resultBmp.setPixels(pixels, 0, outW, 0, 0, outW, outH)
                     scaledFace.recycle()
                 } else if (faceStylizer != null) {
                     val scaledFace = Bitmap.createScaledBitmap(faceBmp, modelInputWidth, modelInputHeight, true); faceBmp.recycle()
                     val stylizedResult = faceStylizer!!.stylize(BitmapImageBuilder(scaledFace).build())
                     stylizedResult?.stylizedImage()?.let { optional -> if (optional.isPresent) {
-                        val stylizedBmp = BitmapExtractor.extract(optional.get())
-                        activity?.runOnUiThread {
-                            val old = lastStylizedBitmap; lastStylizedBitmap = stylizedBmp
-                            lastStylizedCenterX = centerXPx; lastStylizedCenterY = centerYPx; lastStylizedSize = sizePx
-                            old?.recycle()
-                        }
+                        resultBmp = BitmapExtractor.extract(optional.get())
                     } }
                     scaledFace.recycle()
                 } else faceBmp.recycle()
+
+                resultBmp?.let { res ->
+                    activity?.runOnUiThread {
+                        lastStylizedBitmap = res
+                        lastStylizedCenterX = centerXPx; lastStylizedCenterY = centerYPx; lastStylizedSize = sizePx
+                    }
+                }
             } catch (e: Exception) { Log.e(TAG, "Stylize Error", e) } finally { isStylizing = false }
         }
     }
