@@ -363,37 +363,62 @@ class TransformFragment : Fragment() {
     }
 
     private fun calculateStableCrop(faceRes: FaceLandmarkerResult?, poseRes: PoseLandmarkerResult?, imgW: Int, imgH: Int): Triple<Float, Float, Float> {
-        var rawX = 0f; var rawY = 0f; var rawS = 0f
         val TARGET_MULTIPLIER = 2.45f
+        
+        // 1. Calculate Pose-based values (baseline)
+        var pX = 0f; var pY = 0f; var pS = 0f
+        val poseDetected = poseRes?.landmarks()?.isNotEmpty() == true
+        if (poseDetected) {
+            val landmarks = poseRes!!.landmarks()[0]
+            val headPoints = landmarks.take(11)
+            pX = headPoints.map { it.x() }.average().toFloat() * imgW
+            pY = headPoints.map { it.y() }.average().toFloat() * imgH
+            
+            val lShoulder = landmarks[11]; val rShoulder = landmarks[12]
+            val shoulderDist = Math.sqrt(Math.pow((rShoulder.x() - lShoulder.x()).toDouble(), 2.0) + Math.pow((rShoulder.y() - lShoulder.y()).toDouble(), 2.0)).toFloat()
+            val headHeightEst = shoulderDist * 0.40f * imgH
+            pS = headHeightEst * TARGET_MULTIPLIER
+        }
+
+        // 2. Calculate Face-based values
+        var fX = 0f; var fY = 0f; var fS = 0f
         val faceDetected = faceRes?.faceLandmarks()?.isNotEmpty() == true
         val holdFace = !faceDetected && lastValidFaceResult != null && faceLossCounter <= FACE_HOLD_MAX_FRAMES
-        val poseDetected = poseRes?.landmarks()?.isNotEmpty() == true
-        var poseBasedSize = 0f; var headHeightEst = 0f
-        if (poseDetected) {
-            val pLandmarks = poseRes!!.landmarks()[0]
-            val lShoulder = pLandmarks[11]; val rShoulder = pLandmarks[12]
-            val shoulderDist = Math.sqrt(Math.pow((rShoulder.x() - lShoulder.x()).toDouble(), 2.0) + Math.pow((rShoulder.y() - lShoulder.y()).toDouble(), 2.0)).toFloat()
-            headHeightEst = shoulderDist * 0.40f * imgH
-            poseBasedSize = headHeightEst * TARGET_MULTIPLIER
-        }
         if (faceDetected || holdFace) {
             val res = if (faceDetected) faceRes!! else lastValidFaceResult!!
             val landmarks = res.faceLandmarks()[0]
             val minX = landmarks.minOf { it.x() }; val maxX = landmarks.maxOf { it.x() }
             val minY = landmarks.minOf { it.y() }; val maxY = landmarks.maxOf { it.y() }
-            rawX = (minX + maxX) / 2f * imgW
-            rawY = (minY + maxY) / 2f * imgH
+            fX = (minX + maxX) / 2f * imgW
+            fY = (minY + maxY) / 2f * imgH
             val faceH = (maxY - minY) * imgH
-            rawS = if (poseBasedSize > 0) poseBasedSize else faceH * TARGET_MULTIPLIER
-            rawY -= (faceH * 0.05f)
-        } else if (poseDetected) {
-            val landmarks = poseRes!!.landmarks()[0]
-            val headPoints = landmarks.take(11)
-            rawX = headPoints.map { it.x() }.average().toFloat() * imgW
-            rawY = headPoints.map { it.y() }.average().toFloat() * imgH
-            rawS = poseBasedSize
+            fS = if (pS > 0) pS else faceH * TARGET_MULTIPLIER
+            fY -= (faceH * 0.05f)
         }
-        return Triple(rawX, rawY, rawS)
+
+        // 3. Decide and Interpolate (currentCornerRatio: 0 -> Pose, 1 -> Stably Face)
+        val ratio = currentCornerRatio
+        
+        return when {
+            (faceDetected || holdFace) && ratio > 0f -> {
+                if (poseDetected) {
+                    Triple(
+                        pX * (1 - ratio) + fX * ratio,
+                        pY * (1 - ratio) + fY * ratio,
+                        pS * (1 - ratio) + fS * ratio
+                    )
+                } else {
+                    Triple(fX, fY, fS)
+                }
+            }
+            poseDetected -> {
+                Triple(pX, pY, pS)
+            }
+            faceDetected || holdFace -> {
+                Triple(fX, fY, fS)
+            }
+            else -> Triple(0f, 0f, 0f)
+        }
     }
 
     private fun applySemiFilter(src: Bitmap): Bitmap {
