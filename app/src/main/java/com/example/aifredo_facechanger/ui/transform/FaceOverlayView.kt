@@ -8,7 +8,6 @@ import com.example.aifredo_facechanger.utils.OneEuroFilter
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
 import kotlin.math.max
-import kotlin.math.sqrt
 
 class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, attrs) {
 
@@ -26,7 +25,19 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
     private var filteredPoseLandmarks: List<PointF>? = null
 
     private val paint = Paint().apply { isAntiAlias = true; isFilterBitmap = true }
-    private val pointPaint = Paint().apply { color = Color.GREEN; style = Paint.Style.FILL }
+    
+    private val facePointPaint = Paint().apply { 
+        color = Color.GREEN
+        style = Paint.Style.FILL
+        alpha = 180
+    }
+    
+    private val posePointPaint = Paint().apply { 
+        color = Color.CYAN
+        style = Paint.Style.FILL
+        alpha = 200
+    }
+    
     private val facePath = Path()
 
     fun updateFrame(
@@ -55,8 +66,8 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
         val landmarks = result?.landmarks()?.getOrNull(0) ?: run { filteredPoseLandmarks = null; return }
         val timestamp = System.currentTimeMillis()
         filteredPoseLandmarks = landmarks.mapIndexed { index, landmark ->
-            val filterX = poseFiltersX.getOrPut(index) { OneEuroFilter(minCutoff = 10.0, beta = 1.0) }
-            val filterY = poseFiltersY.getOrPut(index) { OneEuroFilter(minCutoff = 10.0, beta = 1.0) }
+            val filterX = poseFiltersX.getOrPut(index) { OneEuroFilter(minCutoff = 5.0, beta = 0.5) }
+            val filterY = poseFiltersY.getOrPut(index) { OneEuroFilter(minCutoff = 5.0, beta = 0.5) }
             PointF(filterX.filter(landmark.x().toDouble(), timestamp).toFloat(), filterY.filter(landmark.y().toDouble(), timestamp).toFloat())
         }
     }
@@ -79,15 +90,18 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
         canvas.clipRect(0f, 0f, midX, height.toFloat())
         canvas.drawBitmap(bitmap, null, RectF(offsetX, offsetY, offsetX + drawW, offsetY + drawH), paint)
         
+        // Pose Landmarks 그리기 (항상 보드랍게 표시)
+        filteredPoseLandmarks?.forEach { 
+            canvas.drawCircle(offsetX + it.x * drawW, offsetY + it.y * drawH, 6f, posePointPaint) 
+        }
+
+        // Face Landmarks 그리기 (Face 모드일 때만 표시)
         if (isFaceActive) {
             currentFaceResult?.faceLandmarks()?.getOrNull(0)?.forEach { 
-                canvas.drawCircle(offsetX + it.x() * drawW, offsetY + it.y() * drawH, 2f, pointPaint) 
-            }
-        } else {
-            filteredPoseLandmarks?.forEach { 
-                canvas.drawCircle(offsetX + it.x * drawW, offsetY + it.y * drawH, 2f, pointPaint) 
+                canvas.drawCircle(offsetX + it.x() * drawW, offsetY + it.y() * drawH, 3f, facePointPaint) 
             }
         }
+        
         canvas.restore()
 
         // 2. 우측 합성 결과 렌더링
@@ -97,13 +111,11 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
 
         val stylized = stylizedBitmap
         if (stylized != null && !stylized.isRecycled && stylizedSize > 0) {
-            // 변환된 당시의 좌표를 현재 뷰 스케일에 맞게 변환
             val sCenterX = stylizedCenter.x * scale
             val sCenterY = stylizedCenter.y * scale
             val sSizePx = stylizedSize * scale
 
             facePath.reset()
-            // 원형 마스크가 변환 이미지를 꽉 채우도록 비율 설정 (0.485f)
             facePath.addCircle(offX + sCenterX, offsetY + sCenterY, sSizePx * 0.485f, Path.Direction.CW)
             
             canvas.save()
@@ -120,6 +132,6 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
         canvas.restore()
         
         // 중앙 분리선
-        canvas.drawLine(midX, 0f, midX, height.toFloat(), Paint().apply { color = Color.WHITE; strokeWidth = 3f })
+        canvas.drawLine(midX, 0f, midX, height.toFloat(), Paint().apply { color = Color.WHITE; strokeWidth = 4f })
     }
 }

@@ -7,131 +7,158 @@
     android:padding="24dp"
     tools:context=".ui.settings.SettingsFragment">
 
-    <TextView
-        android:id="@+id/text_settings_title"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Settings"
-        android:textSize="24sp"
-        android:textStyle="bold"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent" />
-
-    <!-- Model Selection Section -->
-    <TextView
-        android:id="@+id/text_model_label"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="32dp"
-        android:text="Select Face Stylizer Model:"
-        android:textSize="18sp"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/text_settings_title" />
-
-    <RadioGroup
-        android:id="@+id/radioGroup_model"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/text_model_label">
-
-        <RadioButton
-            android:id="@+id/radio_animegan_hayao"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="AnimeGAN v2 (Hayao)" />
-
-        <RadioButton
-            android:id="@+id/radio_animegan_paprika"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="AnimeGAN v2 (Paprika)" />
-
-        <RadioButton
-            android:id="@+id/radio_mediapipe_default"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="MediaPipe Default" />
-
-        <RadioButton
-            android:id="@+id/radio_cartoongan_default"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="CartoonGAN Default" />
-    </RadioGroup>
-
-    <!-- Rendering Mode Selection Section -->
-    <TextView
-        android:id="@+id/text_render_mode_label"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="24dp"
-        android:text="Select Rendering Mode:"
-        android:textSize="18sp"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/radioGroup_model" />
-
-    <RadioGroup
-        android:id="@+id/radioGroup_render_mode"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/text_render_mode_label">
-
-        <RadioButton
-            android:id="@+id/radio_face_only"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Face Only (Background Original)" />
-
-        <RadioButton
-            android:id="@+id/radio_full_frame"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Full Frame (Everything Stylized)" />
-    </RadioGroup>
-
-    <!-- Resolution Selection Section -->
-    <TextView
-        android:id="@+id/text_resolution_label"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="24dp"
-        android:text="Select Transformation Resolution:"
-        android:textSize="18sp"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/radioGroup_render_mode" />
-
-    <RadioGroup
-        android:id="@+id/radioGroup_resolution"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/text_resolution_label">
-
-        <RadioButton
-            android:id="@+id/radio_res_256"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="256 x 256" />
-
-        <RadioButton
-            android:id="@+id/radio_res_512"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="512 x 512" />
-    </RadioGroup>
-
-    <TextView
-        android:id="@+id/text_settings"
+    <ScrollView
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="32dp"
-        android:textAlignment="center"
-        android:visibility="gone"
-        app:layout_constraintTop_toBottomOf="@id/radioGroup_resolution" />
+        android:layout_height="match_parent">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/text_settings_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Settings"
+                android:textSize="24sp"
+                android:textStyle="bold" />
+
+            <!-- Model Selection Section -->
+            <TextView
+                android:id="@+id/text_model_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:text="Select Face Stylizer Model:"
+                android:textSize="18sp" />
+
+            <RadioGroup
+                android:id="@+id/radioGroup_model"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp">
+
+                <RadioButton
+                    android:id="@+id/radio_animegan_hayao"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="AnimeGAN v2 (Hayao)" />
+
+                <RadioButton
+                    android:id="@+id/radio_animegan_paprika"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="AnimeGAN v2 (Paprika)" />
+
+                <RadioButton
+                    android:id="@+id/radio_mediapipe_default"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="MediaPipe Default" />
+
+                <RadioButton
+                    android:id="@+id/radio_cartoongan_default"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="CartoonGAN Default" />
+
+                <RadioButton
+                    android:id="@+id/radio_semi_filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="SEMI-Filter (Non-AI)" />
+            </RadioGroup>
+
+            <!-- Rendering Mode Selection Section -->
+            <TextView
+                android:id="@+id/text_render_mode_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:text="Select Rendering Mode:"
+                android:textSize="18sp" />
+
+            <RadioGroup
+                android:id="@+id/radioGroup_render_mode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp">
+
+                <RadioButton
+                    android:id="@+id/radio_face_only"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Face Only (Background Original)" />
+
+                <RadioButton
+                    android:id="@+id/radio_full_frame"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Full Frame (Everything Stylized)" />
+            </RadioGroup>
+
+            <!-- Resolution Selection Section -->
+            <TextView
+                android:id="@+id/text_resolution_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:text="Select Transformation Resolution:"
+                android:textSize="18sp" />
+
+            <RadioGroup
+                android:id="@+id/radioGroup_resolution"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp">
+
+                <RadioButton
+                    android:id="@+id/radio_res_256"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="256 x 256" />
+
+                <RadioButton
+                    android:id="@+id/radio_res_512"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="512 x 512" />
+            </RadioGroup>
+
+            <!-- Landmark Options Section -->
+            <TextView
+                android:id="@+id/text_landmark_options_label"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:text="Landmark Options:"
+                android:textSize="18sp" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switch_use_face_landmark"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Use Face Landmarker"
+                android:checked="true" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Disabling face landmarker will use Pose for face tracking."
+                android:textSize="12sp"
+                android:alpha="0.7" />
+
+            <TextView
+                android:id="@+id/text_settings"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="32dp"
+                android:textAlignment="center"
+                android:visibility="gone" />
+
+        </LinearLayout>
+    </ScrollView>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

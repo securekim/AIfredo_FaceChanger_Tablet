@@ -91,6 +91,16 @@ class SettingsFragment : Fragment() {
                 apply()
             }
         }
+
+        // --- Landmark Options ---
+        val useFaceLandmark = sharedPref.getBoolean("use_face_landmark", true)
+        binding.switchUseFaceLandmark.isChecked = useFaceLandmark
+        binding.switchUseFaceLandmark.setOnCheckedChangeListener { _, isChecked ->
+            with(sharedPref.edit()) {
+                putBoolean("use_face_landmark", isChecked)
+                apply()
+            }
+        }
     }
 
     override fun onDestroyView() {
