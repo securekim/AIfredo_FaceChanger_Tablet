@@ -160,7 +160,8 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
 
         // Draw Previous (Fading out)
         if (alpha < 1f && prevStylizedBitmap != null && !prevStylizedBitmap!!.isRecycled) {
-            drawStylizedArea(canvas, prevStylizedBitmap!!, prevStylizedCenter, prevStylizedSize, 1f - alpha, scale, offX, offsetY, drawW, drawH)
+            // FIX: Keep prev at 1.0 alpha to prevent background bleed during cross-fade
+            drawStylizedArea(canvas, prevStylizedBitmap!!, prevStylizedCenter, prevStylizedSize, 1.0f, scale, offX, offsetY, drawW, drawH)
         }
 
         // Draw Current (Fading in)

@@ -463,7 +463,7 @@ class TransformFragment : Fragment() {
             Color.RGBToHSV(r, g, b, hsv)
             // Whitening logic: decrease saturation significantly and increase value (brightness)
             // Orange tint usually has high saturation in the yellow/red range.
-            hsv[1] = (hsv[1] * 0.45f).coerceIn(0f, 1f) 
+            hsv[1] = (hsv[1] * 0.45f).coerceIn(0f, 1f)
             hsv[2] = (hsv[2] * 1.4f).coerceIn(0f, 1f)
             
             smoothPixels[i] = Color.HSVToColor(hsv)
@@ -516,7 +516,8 @@ class TransformFragment : Fragment() {
 
     private fun quantizeColorsKMeans(pixels: IntArray, k: Int) {
         if (pixels.isEmpty()) return
-        val random = Random(); val means = IntArray(k)
+        // FIX: Use a fixed seed (0L) for Random to ensure deterministic initialization and prevent shimmering
+        val random = Random(0L); val means = IntArray(k)
         for (i in 0 until k) means[i] = pixels[random.nextInt(pixels.size)]
         val assignments = IntArray(pixels.size)
         repeat(3) {
