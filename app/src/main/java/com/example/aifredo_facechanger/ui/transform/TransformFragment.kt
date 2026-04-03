@@ -45,7 +45,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-import kotlin.math.sqrt
+import kotlin.math.*
 
 class TransformFragment : Fragment() {
 
@@ -431,23 +431,140 @@ class TransformFragment : Fragment() {
 
     private fun applySemiFilter(src: Bitmap): Bitmap {
         val w = src.width; val h = src.height
+        val pixels = IntArray(w * h)
+        src.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        // 1. Edge-preserving Smoothing (Bilateral Filter repeated)
+        var smoothPixels = pixels.copyOf()
+        smoothPixels = applyBilateralFilter(smoothPixels, w, h, 2, 2.0, 30.0)
+        smoothPixels = applyBilateralFilter(smoothPixels, w, h, 2, 2.0, 30.0)
+
+        // 2. Color Quantization (K-Means simplified)
+        quantizeColorsKMeans(smoothPixels, 12)
+
+        // 3. Edge Detection & Masking
+        val edges = extractEdges(pixels, w, h)
+
+        // 4. Combine and HSV Correction
+        val hsv = FloatArray(3)
+        for (i in smoothPixels.indices) {
+            val color = smoothPixels[i]
+            val edge = edges[i] // 0 for edge, 255 for non-edge
+            
+            var r = (color shr 16) and 0xFF
+            var g = (color shr 8) and 0xFF
+            var b = color and 0xFF
+            
+            r = (r * (edge / 255f)).toInt()
+            g = (g * (edge / 255f)).toInt()
+            b = (b * (edge / 255f)).toInt()
+            
+            Color.RGBToHSV(r, g, b, hsv)
+            hsv[1] = (hsv[1] * 1.3f).coerceAtMost(1.0f) // Saturation up
+            hsv[2] = (hsv[2] * 1.2f).coerceAtMost(1.0f) // Value up
+            
+            smoothPixels[i] = Color.HSVToColor(hsv)
+        }
+
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(result)
-        val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-        val cm = ColorMatrix().apply { setSaturation(1.6f); postConcat(ColorMatrix(floatArrayOf(1.3f, 0f, 0f, 0f, -20f, 0f, 1.3f, 0f, 0f, -20f, 0f, 0f, 1.3f, 0f, -20f, 0f, 0f, 0f, 1f, 0f))) }
-        paint.colorFilter = ColorMatrixColorFilter(cm)
-        val scale = 8
-        val scaled = Bitmap.createScaledBitmap(src, (w / scale).coerceAtLeast(1), (h / scale).coerceAtLeast(1), true)
-        canvas.drawBitmap(scaled, null, Rect(0, 0, w, h), paint)
-        scaled.recycle()
-        val edgeBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val eCanvas = Canvas(edgeBmp); val ePaint = Paint()
-        val gcm = ColorMatrix().apply { setSaturation(0f); postConcat(ColorMatrix(floatArrayOf(5f, 0f, 0f, 0f, -600f, 0f, 5f, 0f, 0f, -600f, 0f, 0f, 5f, 0f, -600f, 0f, 0f, 0f, 1f, 0f))) }
-        ePaint.colorFilter = ColorMatrixColorFilter(gcm)
-        eCanvas.drawBitmap(src, 0f, 0f, ePaint)
-        paint.colorFilter = null; paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.MULTIPLY); paint.alpha = 200
-        canvas.drawBitmap(edgeBmp, 0f, 0f, paint); edgeBmp.recycle()
+        result.setPixels(smoothPixels, 0, w, 0, 0, w, h)
         return result
+    }
+
+    private fun applyBilateralFilter(pixels: IntArray, w: Int, h: Int, radius: Int, sigmaSpatial: Double, sigmaColor: Double): IntArray {
+        val output = IntArray(pixels.size)
+        val size = 2 * radius + 1
+        val spatialWeights = FloatArray(size * size)
+        for (dy in -radius..radius) {
+            for (dx in -radius..radius) {
+                spatialWeights[(dy + radius) * size + (dx + radius)] =
+                    exp(-(dx * dx + dy * dy) / (2.0 * sigmaSpatial * sigmaSpatial)).toFloat()
+            }
+        }
+        val colorWeightTable = FloatArray(256 * 256 * 3 + 1)
+        val colorDenom = 2.0 * sigmaColor * sigmaColor
+        for (i in colorWeightTable.indices) colorWeightTable[i] = exp(-i / colorDenom).toFloat()
+
+        for (y in 0 until h) {
+            val yMin = max(0, y - radius); val yMax = min(h - 1, y + radius)
+            for (x in 0 until w) {
+                val centerColor = pixels[y * w + x]
+                val cr = (centerColor shr 16) and 0xFF; val cg = (centerColor shr 8) and 0xFF; val cb = centerColor and 0xFF
+                var sumR = 0f; var sumG = 0f; var sumB = 0f; var totalWeight = 0f
+
+                for (ny in yMin..yMax) {
+                    val yOffset = ny * w
+                    val dy = ny - y
+                    val xMin = max(0, x - radius); val xMax = min(w - 1, x + radius)
+                    for (nx in xMin..xMax) {
+                        val neighborColor = pixels[yOffset + nx]
+                        val nr = (neighborColor shr 16) and 0xFF; val ng = (neighborColor shr 8) and 0xFF; val nb = neighborColor and 0xFF
+                        val distSq = (cr - nr) * (cr - nr) + (cg - ng) * (cg - ng) + (cb - nb) * (cb - nb)
+                        val dx = nx - x
+                        val weight = spatialWeights[(dy + radius) * size + (dx + radius)] * colorWeightTable[distSq]
+                        sumR += nr * weight; sumG += ng * weight; sumB += nb * weight; totalWeight += weight
+                    }
+                }
+                output[y * w + x] = 0xFF000000.toInt() or ((sumR / totalWeight).toInt() shl 16) or ((sumG / totalWeight).toInt() shl 8) or (sumB / totalWeight).toInt()
+            }
+        }
+        return output
+    }
+
+    private fun quantizeColorsKMeans(pixels: IntArray, k: Int) {
+        if (pixels.isEmpty()) return
+        val random = Random(); val means = IntArray(k)
+        for (i in 0 until k) means[i] = pixels[random.nextInt(pixels.size)]
+        val assignments = IntArray(pixels.size)
+        repeat(3) {
+            for (i in pixels.indices) {
+                val c = pixels[i]; val cr = (c shr 16) and 0xFF; val cg = (c shr 8) and 0xFF; val cb = c and 0xFF
+                var minDist = Float.MAX_VALUE; var bestK = 0
+                for (j in 0 until k) {
+                    val mc = means[j]; val mr = (mc shr 16) and 0xFF; val mg = (mc shr 8) and 0xFF; val mb = mc and 0xFF
+                    val d = (cr - mr) * (cr - mr) + (cg - mg) * (cg - mg) + (cb - mb) * (cb - mb).toFloat()
+                    if (d < minDist) { minDist = d; bestK = j }
+                }
+                assignments[i] = bestK
+            }
+            val sumR = LongArray(k); val sumG = LongArray(k); val sumB = LongArray(k); val counts = IntArray(k)
+            for (i in pixels.indices) {
+                val c = pixels[i]; val ki = assignments[i]
+                sumR[ki] += ((c shr 16) and 0xFF).toLong(); sumG[ki] += ((c shr 8) and 0xFF).toLong(); sumB[ki] += (c and 0xFF).toLong(); counts[ki]++
+            }
+            for (j in 0 until k) if (counts[j] > 0) means[j] = 0xFF000000.toInt() or ((sumR[j] / counts[j]).toInt() shl 16) or ((sumG[j] / counts[j]).toInt() shl 8) or (sumB[j] / counts[j]).toInt()
+        }
+        for (i in pixels.indices) pixels[i] = means[assignments[i]]
+    }
+
+    private fun extractEdges(pixels: IntArray, w: Int, h: Int): IntArray {
+        val gray = IntArray(pixels.size)
+        for (i in pixels.indices) {
+            val c = pixels[i]
+            gray[i] = ((c shr 16 and 0xFF) * 0.299 + (c shr 8 and 0xFF) * 0.587 + (c and 0xFF) * 0.114).toInt()
+        }
+        val blurred = IntArray(gray.size)
+        for (y in 1 until h - 1) {
+            for (x in 1 until w - 1) {
+                val window = IntArray(9); var idx = 0
+                for (dy in -1..1) for (dx in -1..1) window[idx++] = gray[(y + dy) * w + (x + dx)]
+                window.sort(); blurred[y * w + x] = window[4]
+            }
+        }
+        val edges = IntArray(gray.size); val blockSize = 7; val halfBlock = blockSize / 2; val C = 5
+        for (y in 0 until h) {
+            val yMin = max(0, y - halfBlock); val yMax = min(h - 1, y + halfBlock)
+            for (x in 0 until w) {
+                var sum = 0; var count = 0
+                val xMin = max(0, x - halfBlock); val xMax = min(w - 1, x + halfBlock)
+                for (ny in yMin..yMax) {
+                    val offset = ny * w
+                    for (nx in xMin..xMax) { sum += blurred[offset + nx]; count++ }
+                }
+                edges[y * w + x] = if (blurred[y * w + x] < (sum / count) - C) 0 else 255
+            }
+        }
+        return edges
     }
 
     private fun performStylization(targetBmp: Bitmap, centerXPx: Float, centerYPx: Float, sizePx: Float) {
