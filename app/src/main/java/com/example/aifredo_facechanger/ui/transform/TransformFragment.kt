@@ -86,6 +86,11 @@ class TransformFragment : Fragment() {
     private var faceLossCounter = 0
     private val FACE_HOLD_MAX_FRAMES = 10
 
+    // Stability & Transition
+    private var faceDetectionStartTime: Long = 0
+    private var transitionStartTime: Long = 0
+    @Volatile private var currentCornerRatio: Float = 0f // Start from 0 (Circle)
+
     private val filterX = OneEuroFilter(minCutoff = 1.0, beta = 0.02)
     private val filterY = OneEuroFilter(minCutoff = 1.0, beta = 0.02)
     private val filterSize = OneEuroFilter(minCutoff = 0.5, beta = 0.01)
@@ -166,6 +171,9 @@ class TransformFragment : Fragment() {
                 lastPoseResult = null
                 lastValidFaceResult = null
                 faceLossCounter = 0
+                faceDetectionStartTime = 0
+                transitionStartTime = 0
+                currentCornerRatio = 0f
             }
 
             val faceModel = "face_landmarker.task"
@@ -179,11 +187,33 @@ class TransformFragment : Fragment() {
                     .setRunningMode(RunningMode.LIVE_STREAM)
                     .setResultListener { result, _ -> 
                         lastFaceResult = result
+                        val currentTime = System.currentTimeMillis()
                         if (result.faceLandmarks().isNotEmpty()) {
                             lastValidFaceResult = result
                             faceLossCounter = 0
+                            
+                            if (faceDetectionStartTime == 0L) {
+                                faceDetectionStartTime = currentTime
+                            } else if (currentTime - faceDetectionStartTime > 1000L) {
+                                if (transitionStartTime == 0L) {
+                                    transitionStartTime = currentTime
+                                }
+                            }
                         } else {
                             faceLossCounter++
+                            if (faceLossCounter > FACE_HOLD_MAX_FRAMES) {
+                                faceDetectionStartTime = 0
+                                transitionStartTime = 0
+                            }
+                        }
+                        
+                        // Calculate face shape transition: 0 (Circle) -> 1 (Precise Face)
+                        if (transitionStartTime > 0L) {
+                            val elapsed = currentTime - transitionStartTime
+                            // 1 second transition
+                            currentCornerRatio = (elapsed / 1000f).coerceIn(0f, 1f)
+                        } else {
+                            currentCornerRatio = 0f
                         }
                     }
                     .build())
@@ -504,7 +534,8 @@ class TransformFragment : Fragment() {
             if (_binding != null) {
                 binding.faceOverlay.updateFrame(
                     original = newFrame, stylized = lastStylizedBitmap, sCenter = PointF(filteredCenterX, filteredCenterY),
-                    sSize = filteredSize, curFace = lastFaceResult, curPose = lastPoseResult, mode = renderMode, isFaceActive = useFaceLandmarkPref
+                    sSize = filteredSize, curFace = lastFaceResult, curPose = lastPoseResult, mode = renderMode, 
+                    isFaceActive = useFaceLandmarkPref, shapeProgress = currentCornerRatio
                 )
             }
         }
