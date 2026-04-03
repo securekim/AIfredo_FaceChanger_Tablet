@@ -455,13 +455,16 @@ class TransformFragment : Fragment() {
             var g = (color shr 8) and 0xFF
             var b = color and 0xFF
             
+            // Apply edge masking
             r = (r * (edge / 255f)).toInt()
             g = (g * (edge / 255f)).toInt()
             b = (b * (edge / 255f)).toInt()
             
             Color.RGBToHSV(r, g, b, hsv)
-            hsv[1] = (hsv[1] * 1.3f).coerceAtMost(1.0f) // Saturation up
-            hsv[2] = (hsv[2] * 1.2f).coerceAtMost(1.0f) // Value up
+            // Whitening logic: decrease saturation significantly and increase value (brightness)
+            // Orange tint usually has high saturation in the yellow/red range.
+            hsv[1] = (hsv[1] * 0.45f).coerceIn(0f, 1f) 
+            hsv[2] = (hsv[2] * 1.4f).coerceIn(0f, 1f)
             
             smoothPixels[i] = Color.HSVToColor(hsv)
         }
