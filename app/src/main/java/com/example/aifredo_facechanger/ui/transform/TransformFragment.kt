@@ -194,7 +194,7 @@ class TransformFragment : Fragment() {
                             
                             if (faceDetectionStartTime == 0L) {
                                 faceDetectionStartTime = currentTime
-                            } else if (currentTime - faceDetectionStartTime > 1000L) {
+                            } else if (currentTime - faceDetectionStartTime > 100L) {
                                 if (transitionStartTime == 0L) {
                                     transitionStartTime = currentTime
                                 }
@@ -210,8 +210,9 @@ class TransformFragment : Fragment() {
                         // Calculate face shape transition: 0 (Circle) -> 1 (Precise Face)
                         if (transitionStartTime > 0L) {
                             val elapsed = currentTime - transitionStartTime
-                            // 1 second transition
-                            currentCornerRatio = (elapsed / 1000f).coerceIn(0f, 1f)
+                            // 0.5 second transition with Ease-In effect for "sucking in" feel
+                            val t = (elapsed / 100f).coerceIn(0f, 1f)
+                            currentCornerRatio = t * t * t // Cubic Ease-In
                         } else {
                             currentCornerRatio = 0f
                         }
