@@ -35,6 +35,7 @@ class SettingsFragment : Fragment() {
             "AnimeGAN_Paprika" -> binding.radioAnimeganPaprika.isChecked = true
             "MediaPipe_Default" -> binding.radioMediapipeDefault.isChecked = true
             "CartoonGAN_Default" -> binding.radioCartoonganDefault.isChecked = true
+            "SEMI_Filter" -> binding.radioSemiFilter.isChecked = true
             else -> binding.radioAnimeganHayao.isChecked = true
         }
 
@@ -44,6 +45,7 @@ class SettingsFragment : Fragment() {
                 R.id.radio_animegan_paprika -> "AnimeGAN_Paprika"
                 R.id.radio_mediapipe_default -> "MediaPipe_Default"
                 R.id.radio_cartoongan_default -> "CartoonGAN_Default"
+                R.id.radio_semi_filter -> "SEMI_Filter"
                 else -> "AnimeGAN_Hayao"
             }
             with(sharedPref.edit()) {
