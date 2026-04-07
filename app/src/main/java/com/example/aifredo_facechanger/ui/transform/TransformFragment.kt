@@ -86,20 +86,17 @@ class TransformFragment : Fragment() {
     private var faceLossCounter = 0
     private val FACE_HOLD_MAX_FRAMES = 10
 
-    // Offset Tracking State
     private var trackOffsetX = 0f
     private var trackOffsetY = 0f
     private var trackScaleRatio = 1f
     private var hasValidTrackOffset = false
-    private val TARGET_MULTIPLIER = 1.3f
+    private val TARGET_MULTIPLIER = 1.45f
 
-    // Face Stability State
     private var lastRawFx = 0f
     private var lastRawFy = 0f
     private var lastRawFs = 0f
     private var unstableFaceCounter = 0
 
-    // Stability & Transition
     private var faceDetectionStartTime: Long = 0
     private var lastTransitionUpdateTime: Long = 0
     @Volatile private var rawTransitionRatio: Float = 0f
@@ -219,7 +216,7 @@ class TransformFragment : Fragment() {
                         val deltaTime = if (lastTransitionUpdateTime == 0L) 0L else currentTime - lastTransitionUpdateTime
                         lastTransitionUpdateTime = currentTime
 
-                        val step = (deltaTime / 1000f) * 2.5f
+                        val step = (deltaTime / 1000f) * 3.5f
 
                         if (result.faceLandmarks().isNotEmpty()) {
                             lastValidFaceResult = result
@@ -227,13 +224,13 @@ class TransformFragment : Fragment() {
 
                             if (faceDetectionStartTime == 0L) {
                                 faceDetectionStartTime = currentTime
-                            } else if (currentTime - faceDetectionStartTime > 300L) {
+                            } else if (currentTime - faceDetectionStartTime > 100L) {
                                 targetTransitionRatio = 1f
                             }
                         } else {
                             faceLossCounter++
 
-                            if (faceLossCounter > FACE_HOLD_MAX_FRAMES) {
+                            if (faceLossCounter > 3) {
                                 faceDetectionStartTime = 0
                                 targetTransitionRatio = 0f
                             }
@@ -412,7 +409,7 @@ class TransformFragment : Fragment() {
 
         val faceDetected = faceRes?.faceLandmarks()?.isNotEmpty() == true
         var fCx = 0f; var fCy = 0f; var fSize = 0f
-        var isFaceStable = false
+        var isValidFace = false
 
         if (faceDetected) {
             val landmarks = faceRes!!.faceLandmarks()[0]
@@ -423,31 +420,31 @@ class TransformFragment : Fragment() {
 
             val faceW = maxFx - minFx
             val faceH = maxFy - minFy
+
             val rawCx = (minFx + maxFx) / 2f
-            val rawCy = (minFy + maxFy) / 2f - (faceH * 0.15f) // 상향 조정 (0.15배)
-            val rawSize = max(faceW, faceH) * TARGET_MULTIPLIER // 1.3배 고정
+            val rawCy = (minFy + maxFy) / 2f - (faceH * 0.05f)
+            val rawSize = max(faceW, faceH) * TARGET_MULTIPLIER
 
             if (lastRawFs > 0f) {
                 val sizeJump = abs(rawSize - lastRawFs) / lastRawFs
                 val posJump = sqrt((rawCx - lastRawFx).pow(2) + (rawCy - lastRawFy).pow(2)) / lastRawFs
 
-                // 속도 및 이상치 검사: 1프레임 내 변화율이 25% 미만이어야 안정적으로 판단
-                if (sizeJump < 0.25f && posJump < 0.25f) {
-                    isFaceStable = true
+                if (sizeJump < 0.15f && posJump < 0.15f) {
+                    isValidFace = true
                     unstableFaceCounter = 0
                 } else {
                     unstableFaceCounter++
-                    if (unstableFaceCounter > 3) {
-                        isFaceStable = true // 지속적인 변화라면 새로운 위치 신뢰
+                    if (unstableFaceCounter > 4) {
+                        isValidFace = true
                         unstableFaceCounter = 0
                     }
                 }
             } else {
-                isFaceStable = true
+                isValidFace = true
                 unstableFaceCounter = 0
             }
 
-            if (isFaceStable) {
+            if (isValidFace) {
                 fCx = rawCx
                 fCy = rawCy
                 fSize = rawSize
@@ -457,31 +454,20 @@ class TransformFragment : Fragment() {
                 lastRawFs = rawSize
             }
         } else {
-            lastRawFs = 0f
+            if (lastRawFs == 0f) lastRawFs = 0f
         }
 
         return when {
-            isFaceStable && poseDetected -> {
-                val currentOffsetX = fCx - pCx
-                val currentOffsetY = fCy - pCy
-                val currentScaleRatio = fSize / pSize
-
-                if (!hasValidTrackOffset) {
-                    trackOffsetX = currentOffsetX
-                    trackOffsetY = currentOffsetY
-                    trackScaleRatio = currentScaleRatio
-                    hasValidTrackOffset = true
-                } else {
-                    trackOffsetX = trackOffsetX * 0.8f + currentOffsetX * 0.2f
-                    trackOffsetY = trackOffsetY * 0.8f + currentOffsetY * 0.2f
-                    trackScaleRatio = trackScaleRatio * 0.8f + currentScaleRatio * 0.2f
-                }
+            isValidFace && poseDetected -> {
+                trackOffsetX = fCx - pCx
+                trackOffsetY = fCy - pCy
+                hasValidTrackOffset = true
                 Triple(fCx, fCy, fSize)
             }
             poseDetected && hasValidTrackOffset -> {
-                Triple(pCx + trackOffsetX, pCy + trackOffsetY, pSize * trackScaleRatio)
+                Triple(pCx + trackOffsetX, pCy + trackOffsetY, lastRawFs)
             }
-            isFaceStable -> {
+            isValidFace -> {
                 Triple(fCx, fCy, fSize)
             }
             poseDetected -> {
