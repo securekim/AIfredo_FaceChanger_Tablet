@@ -86,11 +86,25 @@ class TransformFragment : Fragment() {
     private var faceLossCounter = 0
     private val FACE_HOLD_MAX_FRAMES = 10
 
+    // Offset Tracking State
+    private var trackOffsetX = 0f
+    private var trackOffsetY = 0f
+    private var trackScaleRatio = 1f
+    private var hasValidTrackOffset = false
+    private val TARGET_MULTIPLIER = 1.3f
+
+    // Face Stability State
+    private var lastRawFx = 0f
+    private var lastRawFy = 0f
+    private var lastRawFs = 0f
+    private var unstableFaceCounter = 0
+
     // Stability & Transition
     private var faceDetectionStartTime: Long = 0
     private var lastTransitionUpdateTime: Long = 0
-    private var rawTransitionRatio: Float = 0f
-    @Volatile private var currentCornerRatio: Float = 0f // Start from 0 (Circle)
+    @Volatile private var rawTransitionRatio: Float = 0f
+    @Volatile private var targetTransitionRatio: Float = 0f
+    @Volatile private var currentCornerRatio: Float = 0f
 
     private val filterX = OneEuroFilter(minCutoff = 1.0, beta = 0.02)
     private val filterY = OneEuroFilter(minCutoff = 1.0, beta = 0.02)
@@ -122,10 +136,10 @@ class TransformFragment : Fragment() {
         cameraExecutor = Executors.newSingleThreadExecutor()
         stylizerExecutor = Executors.newSingleThreadExecutor()
         backgroundExecutor = Executors.newSingleThreadExecutor()
-        
+
         loadSettings()
         backgroundExecutor?.execute { if (isAdded) setupAnalyzers() }
-        
+
         if (allPermissionsGranted()) startCamera()
         else requestPermissionLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
     }
@@ -136,10 +150,10 @@ class TransformFragment : Fragment() {
         val oldFaceLandmark = useFaceLandmarkPref
         val oldFaceDelegate = faceDelegatePref
         val oldPoseDelegate = poseDelegatePref
-        
+
         loadSettings()
-        
-        if (oldModel != currentModelPref || oldFaceLandmark != useFaceLandmarkPref || 
+
+        if (oldModel != currentModelPref || oldFaceLandmark != useFaceLandmarkPref ||
             oldFaceDelegate != faceDelegatePref || oldPoseDelegate != poseDelegatePref) {
             backgroundExecutor?.execute { if (isAdded) setupAnalyzers() }
         }
@@ -161,7 +175,7 @@ class TransformFragment : Fragment() {
         val context = context ?: return
         isReady = false
         activity?.runOnUiThread { addLog("--- SYSTEM INITIALIZING ---") }
-        
+
         try {
             synchronized(landmarkLock) {
                 faceLandmarker?.close()
@@ -175,7 +189,18 @@ class TransformFragment : Fragment() {
                 faceDetectionStartTime = 0
                 lastTransitionUpdateTime = 0
                 rawTransitionRatio = 0f
+                targetTransitionRatio = 0f
                 currentCornerRatio = 0f
+
+                trackOffsetX = 0f
+                trackOffsetY = 0f
+                trackScaleRatio = 1f
+                hasValidTrackOffset = false
+
+                lastRawFx = 0f
+                lastRawFy = 0f
+                lastRawFs = 0f
+                unstableFaceCounter = 0
             }
 
             val faceModel = "face_landmarker.task"
@@ -187,64 +212,69 @@ class TransformFragment : Fragment() {
                 FaceLandmarker.createFromOptions(context, FaceLandmarker.FaceLandmarkerOptions.builder()
                     .setBaseOptions(BaseOptions.builder().setDelegate(faceDelegate).setModelAssetPath(faceModel).build())
                     .setRunningMode(RunningMode.LIVE_STREAM)
-                    .setResultListener { result, _ -> 
+                    .setResultListener { result, _ ->
                         lastFaceResult = result
                         val currentTime = System.currentTimeMillis()
-                        
+
                         val deltaTime = if (lastTransitionUpdateTime == 0L) 0L else currentTime - lastTransitionUpdateTime
                         lastTransitionUpdateTime = currentTime
-                        val step = deltaTime / 100f // 0.1s duration
+
+                        val step = (deltaTime / 1000f) * 2.5f
 
                         if (result.faceLandmarks().isNotEmpty()) {
                             lastValidFaceResult = result
                             faceLossCounter = 0
-                            
+
                             if (faceDetectionStartTime == 0L) {
                                 faceDetectionStartTime = currentTime
-                            } else if (currentTime - faceDetectionStartTime > 100L) {
-                                // Stability reached, proceed with transition
-                                rawTransitionRatio = (rawTransitionRatio + step).coerceIn(0f, 1f)
+                            } else if (currentTime - faceDetectionStartTime > 300L) {
+                                targetTransitionRatio = 1f
                             }
                         } else {
                             faceLossCounter++
+
                             if (faceLossCounter > FACE_HOLD_MAX_FRAMES) {
                                 faceDetectionStartTime = 0
-                                // Slowly transition back to 0 (Pose)
-                                rawTransitionRatio = (rawTransitionRatio - step).coerceIn(0f, 1f)
+                                targetTransitionRatio = 0f
                             }
                         }
-                        
-                        // Apply Cubic Ease-In for "sucking in" feel
+
+                        if (rawTransitionRatio < targetTransitionRatio) {
+                            rawTransitionRatio = (rawTransitionRatio + step).coerceAtMost(targetTransitionRatio)
+                        } else if (rawTransitionRatio > targetTransitionRatio) {
+                            rawTransitionRatio = (rawTransitionRatio - step).coerceAtLeast(targetTransitionRatio)
+                        }
+
                         val t = rawTransitionRatio
-                        currentCornerRatio = t * t * t 
+                        currentCornerRatio = t * t * (3 - 2 * t)
                     }
                     .build())
             } else null
-            
+
             val newPoseLandmarker = PoseLandmarker.createFromOptions(context, PoseLandmarker.PoseLandmarkerOptions.builder()
                 .setBaseOptions(BaseOptions.builder().setDelegate(poseDelegate).setModelAssetPath(poseModel).build())
                 .setRunningMode(RunningMode.LIVE_STREAM)
-                .setResultListener { result, _ -> 
+                .setResultListener { result, _ ->
                     lastPoseResult = result
                     processFrame(result.timestampMs())
                 }
                 .build())
-            
+
             synchronized(landmarkLock) {
                 faceLandmarker = newFaceLandmarker
                 poseLandmarker = newPoseLandmarker
             }
 
-            activity?.runOnUiThread { 
+            activity?.runOnUiThread {
                 addLog("1. Face Landmarker : ${if (useFaceLandmarkPref) faceDelegatePref else "DISABLED"}")
                 addLog("2. Pose Landmarker : $poseDelegatePref")
             }
-            
+
             setupStylizerSync()
-            
+
             isReady = true
             activity?.runOnUiThread { addLog("--- ALL SYSTEMS READY ---") }
-        } catch (e: Exception) { 
+        } catch (e: Exception) {
             activity?.runOnUiThread { addLog("Initialization Error: ${e.message}") }
             Log.e(TAG, "Initialization Error", e)
         }
@@ -281,7 +311,7 @@ class TransformFragment : Fragment() {
                 var finalInterpreter: Interpreter? = null
                 var finalDelegate: GpuDelegate? = null
                 var success = false
-                
+
                 fun tryInit(useGpu: Boolean, useResize: Boolean): Boolean {
                     return try {
                         val options = Interpreter.Options().apply {
@@ -314,13 +344,13 @@ class TransformFragment : Fragment() {
                 if (success && finalInterpreter != null) {
                     val shape = finalInterpreter!!.getInputTensor(0).shape()
                     if (shape.size >= 4) { modelInputHeight = shape[1]; modelInputWidth = shape[2] }
-                    
+
                     val oldInt = tfliteInterpreter; val oldDel = gpuDelegate; val oldStylizer = faceStylizer
                     tfliteInterpreter = finalInterpreter; gpuDelegate = finalDelegate; faceStylizer = null
                     oldInt?.close(); oldDel?.close(); oldStylizer?.close()
-                    
-                    activity?.runOnUiThread { 
-                        addLog("4. Face Stylizer  : ${if (finalDelegate != null) "GPU \uD83D\uDE80" else "CPU \uD83D\uDCBB"}")
+
+                    activity?.runOnUiThread {
+                        addLog("4. Face Stylizer  : ${if (finalDelegate != null) "GPU" else "CPU"}")
                         addLog("   -> Resolution: ${modelInputWidth}x${modelInputHeight}")
                     }
                 }
@@ -330,9 +360,9 @@ class TransformFragment : Fragment() {
                 val oldInt = tfliteInterpreter; val oldDel = gpuDelegate; val oldStylizer = faceStylizer
                 faceStylizer = newStylizer; tfliteInterpreter = null; gpuDelegate = null
                 oldInt?.close(); oldDel?.close(); oldStylizer?.close()
-                activity?.runOnUiThread { addLog("4. Face Stylizer  : GPU \uD83D\uDE80 (MediaPipe)") }
+                activity?.runOnUiThread { addLog("4. Face Stylizer  : GPU (MediaPipe)") }
             }
-        } catch (e: Exception) { 
+        } catch (e: Exception) {
             activity?.runOnUiThread { addLog("Stylizer Load Error: ${e.message}") }
         }
     }
@@ -349,83 +379,117 @@ class TransformFragment : Fragment() {
         if (!isReady) return
         val capturedBmp = frameCache[ts] ?: return
         if (capturedBmp.isRecycled) return
-        
+
         val faceResult = if (useFaceLandmarkPref) lastFaceResult else null
         val (rawX, rawY, rawS) = calculateStableCrop(faceResult, lastPoseResult, capturedBmp.width, capturedBmp.height)
-        
+
         if (rawS > 0) {
             filteredCenterX = filterX.filter(rawX.toDouble(), ts).toFloat()
             filteredCenterY = filterY.filter(rawY.toDouble(), ts).toFloat()
             filteredSize = filterSize.filter(rawS.toDouble(), ts).toFloat()
         }
-        
+
         if (!isStylizing && filteredSize > 10) {
             performStylization(capturedBmp, filteredCenterX, filteredCenterY, filteredSize)
         }
     }
 
     private fun calculateStableCrop(faceRes: FaceLandmarkerResult?, poseRes: PoseLandmarkerResult?, imgW: Int, imgH: Int): Triple<Float, Float, Float> {
-        val TARGET_MULTIPLIER = 2.45f
-        
-        // 1. Calculate Pose-based values (baseline)
-        var pX = 0f; var pY = 0f; var pS = 0f
         val poseDetected = poseRes?.landmarks()?.isNotEmpty() == true
+        var pCx = 0f; var pCy = 0f; var pSize = 0f
+
         if (poseDetected) {
-            val landmarks = poseRes!!.landmarks()[0]
-            val headPoints = landmarks.take(11)
-            pX = headPoints.map { it.x() }.average().toFloat() * imgW
-            pY = headPoints.map { it.y() }.average().toFloat() * imgH
-            
-            val lShoulder = landmarks[11]; val rShoulder = landmarks[12]
-            val shoulderDist = Math.sqrt(Math.pow((rShoulder.x() - lShoulder.x()).toDouble(), 2.0) + Math.pow((rShoulder.y() - lShoulder.y()).toDouble(), 2.0)).toFloat()
-            val headHeightEst = shoulderDist * 0.40f * imgH
-            pS = headHeightEst * TARGET_MULTIPLIER
+            val headPoints = poseRes!!.landmarks()[0].take(11)
+            val minPx = headPoints.minOf { it.x() } * imgW
+            val maxPx = headPoints.maxOf { it.x() } * imgW
+            val minPy = headPoints.minOf { it.y() } * imgH
+            val maxPy = headPoints.maxOf { it.y() } * imgH
+
+            pCx = (minPx + maxPx) / 2f
+            pCy = (minPy + maxPy) / 2f
+            pSize = max(maxPx - minPx, maxPy - minPy)
         }
 
-        // 2. Calculate Face-based values
-        var fX = 0f; var fY = 0f; var fS = 0f
         val faceDetected = faceRes?.faceLandmarks()?.isNotEmpty() == true
-        val holdFace = !faceDetected && lastValidFaceResult != null && faceLossCounter <= FACE_HOLD_MAX_FRAMES
-        if (faceDetected || holdFace) {
-            val res = if (faceDetected) faceRes!! else lastValidFaceResult!!
-            val landmarks = res.faceLandmarks()[0]
-            val minX = landmarks.minOf { it.x() }; val maxX = landmarks.maxOf { it.x() }
-            val minY = landmarks.minOf { it.y() }; val maxY = landmarks.maxOf { it.y() }
-            fX = (minX + maxX) / 2f * imgW
-            fY = (minY + maxY) / 2f * imgH
-            val faceH = (maxY - minY) * imgH
-            fS = if (pS > 0) pS else faceH * TARGET_MULTIPLIER
-            fY -= (faceH * 0.05f)
+        var fCx = 0f; var fCy = 0f; var fSize = 0f
+        var isFaceStable = false
+
+        if (faceDetected) {
+            val landmarks = faceRes!!.faceLandmarks()[0]
+            val minFx = landmarks.minOf { it.x() } * imgW
+            val maxFx = landmarks.maxOf { it.x() } * imgW
+            val minFy = landmarks.minOf { it.y() } * imgH
+            val maxFy = landmarks.maxOf { it.y() } * imgH
+
+            val faceW = maxFx - minFx
+            val faceH = maxFy - minFy
+            val rawCx = (minFx + maxFx) / 2f
+            val rawCy = (minFy + maxFy) / 2f - (faceH * 0.15f) // 상향 조정 (0.15배)
+            val rawSize = max(faceW, faceH) * TARGET_MULTIPLIER // 1.3배 고정
+
+            if (lastRawFs > 0f) {
+                val sizeJump = abs(rawSize - lastRawFs) / lastRawFs
+                val posJump = sqrt((rawCx - lastRawFx).pow(2) + (rawCy - lastRawFy).pow(2)) / lastRawFs
+
+                // 속도 및 이상치 검사: 1프레임 내 변화율이 25% 미만이어야 안정적으로 판단
+                if (sizeJump < 0.25f && posJump < 0.25f) {
+                    isFaceStable = true
+                    unstableFaceCounter = 0
+                } else {
+                    unstableFaceCounter++
+                    if (unstableFaceCounter > 3) {
+                        isFaceStable = true // 지속적인 변화라면 새로운 위치 신뢰
+                        unstableFaceCounter = 0
+                    }
+                }
+            } else {
+                isFaceStable = true
+                unstableFaceCounter = 0
+            }
+
+            if (isFaceStable) {
+                fCx = rawCx
+                fCy = rawCy
+                fSize = rawSize
+
+                lastRawFx = rawCx
+                lastRawFy = rawCy
+                lastRawFs = rawSize
+            }
+        } else {
+            lastRawFs = 0f
         }
 
-        // 3. Decide and Interpolate (currentCornerRatio: 0 -> Pose, 1 -> Stably Face)
-        val ratio = currentCornerRatio
-        
         return when {
-            ratio > 0f -> {
-                if (poseDetected && (faceDetected || holdFace)) {
-                    Triple(
-                        pX * (1 - ratio) + fX * ratio,
-                        pY * (1 - ratio) + fY * ratio,
-                        pS * (1 - ratio) + fS * ratio
-                    )
-                } else if (faceDetected || holdFace) {
-                    Triple(fX, fY, fS)
-                } else if (poseDetected) {
-                    Triple(pX * (1 - ratio) + lastStylizedCenterX * ratio, 
-                           pY * (1 - ratio) + lastStylizedCenterY * ratio, 
-                           pS * (1 - ratio) + lastStylizedSize * ratio)
+            isFaceStable && poseDetected -> {
+                val currentOffsetX = fCx - pCx
+                val currentOffsetY = fCy - pCy
+                val currentScaleRatio = fSize / pSize
+
+                if (!hasValidTrackOffset) {
+                    trackOffsetX = currentOffsetX
+                    trackOffsetY = currentOffsetY
+                    trackScaleRatio = currentScaleRatio
+                    hasValidTrackOffset = true
                 } else {
-                    Triple(fX, fY, fS)
+                    trackOffsetX = trackOffsetX * 0.8f + currentOffsetX * 0.2f
+                    trackOffsetY = trackOffsetY * 0.8f + currentOffsetY * 0.2f
+                    trackScaleRatio = trackScaleRatio * 0.8f + currentScaleRatio * 0.2f
                 }
+                Triple(fCx, fCy, fSize)
+            }
+            poseDetected && hasValidTrackOffset -> {
+                Triple(pCx + trackOffsetX, pCy + trackOffsetY, pSize * trackScaleRatio)
+            }
+            isFaceStable -> {
+                Triple(fCx, fCy, fSize)
             }
             poseDetected -> {
-                Triple(pX, pY, pS)
+                Triple(pCx, pCy, pSize * TARGET_MULTIPLIER)
             }
-            faceDetected || holdFace -> {
-                Triple(fX, fY, fS)
+            else -> {
+                Triple(lastStylizedCenterX, lastStylizedCenterY, lastStylizedSize)
             }
-            else -> Triple(0f, 0f, 0f)
         }
     }
 
@@ -433,7 +497,6 @@ class TransformFragment : Fragment() {
         val originalW = src.width
         val originalH = src.height
 
-        // Optimization: Reduce resolution to 160x160 for maximum speed
         val targetSize = 160
         val needsScaling = originalW > targetSize || originalH > targetSize
         val workingBitmap = if (needsScaling) {
@@ -447,22 +510,18 @@ class TransformFragment : Fragment() {
         val pixels = IntArray(w * h)
         workingBitmap.getPixels(pixels, 0, w, 0, 0, w, h)
 
-        // 1. Bilateral Filter (Single pass, smaller radius)
         val smoothPixels = applyBilateralFilter(pixels, w, h, 1, 1.5, 25.0)
 
-        // 2. Posterization (Super fast alternative to K-Means)
         for (i in smoothPixels.indices) {
             val c = smoothPixels[i]
-            val r = (c shr 16) and 0xE0 
+            val r = (c shr 16) and 0xE0
             val g = (c shr 8) and 0xE0
             val b = c and 0xE0
             smoothPixels[i] = 0xFF000000.toInt() or (r shl 16) or (g shl 8) or b
         }
 
-        // 3. Edge Detection (Sliding Window optimization)
         val edges = extractEdges(pixels, w, h)
 
-        // 4. Combine and HSV Correction
         val hsv = FloatArray(3)
         for (i in smoothPixels.indices) {
             val color = smoothPixels[i]
@@ -472,7 +531,7 @@ class TransformFragment : Fragment() {
             var g = (color shr 8) and 0xFF
             var b = color and 0xFF
 
-            if (edge == 0) { // Darken edges
+            if (edge == 0) {
                 r = r shr 1; g = g shr 1; b = b shr 1
             }
 
@@ -552,7 +611,7 @@ class TransformFragment : Fragment() {
             meansR[i] = (c shr 16) and 0xFF; meansG[i] = (c shr 8) and 0xFF; meansB[i] = c and 0xFF
         }
         val assignments = IntArray(pixels.size)
-        repeat(2) { // Reduced iterations for speed
+        repeat(2) {
             for (i in pixels.indices) {
                 val c = pixels[i]; val cr = (c shr 16) and 0xFF; val cg = (c shr 8) and 0xFF; val cb = c and 0xFF
                 var minDistSq = Int.MAX_VALUE; var bestK = 0
@@ -634,9 +693,9 @@ class TransformFragment : Fragment() {
                 val paint = Paint().apply { isFilterBitmap = true; setShader(shader) }
                 val m = Matrix(); m.postTranslate(-left, -top); shader.setLocalMatrix(m)
                 canvas.drawRect(0f, 0f, intSize.toFloat(), intSize.toFloat(), paint)
-                
+
                 var resultBmp: Bitmap? = null
-                
+
                 if (currentModelPref == "SEMI_Filter") {
                     resultBmp = applySemiFilter(faceBmp); faceBmp.recycle()
                 } else if (tfliteInterpreter != null) {
@@ -692,7 +751,7 @@ class TransformFragment : Fragment() {
 
     private fun analyzeFrame(imageProxy: ImageProxy) {
         if (!isAdded || _binding == null || !isReady) { imageProxy.close(); return }
-        
+
         val newFrame = try {
             synchronized(inputBitmapLock) {
                 if (inputBitmap == null || inputBitmap!!.width != imageProxy.width || imageProxy.height != inputBitmap!!.height) {
@@ -709,7 +768,7 @@ class TransformFragment : Fragment() {
 
         val ts = System.currentTimeMillis()
         frameCache[ts] = newFrame
-        
+
         val iterator = frameCache.keys.iterator()
         while (iterator.hasNext()) {
             val key = iterator.next()
@@ -730,7 +789,7 @@ class TransformFragment : Fragment() {
             if (_binding != null) {
                 binding.faceOverlay.updateFrame(
                     original = newFrame, stylized = lastStylizedBitmap, sCenter = PointF(filteredCenterX, filteredCenterY),
-                    sSize = filteredSize, curFace = lastFaceResult, curPose = lastPoseResult, mode = renderMode, 
+                    sSize = filteredSize, curFace = lastFaceResult, curPose = lastPoseResult, mode = renderMode,
                     isFaceActive = useFaceLandmarkPref, shapeProgress = currentCornerRatio
                 )
             }
@@ -777,7 +836,7 @@ class TransformFragment : Fragment() {
             cameraExecutor?.awaitTermination(200, TimeUnit.MILLISECONDS)
             stylizerExecutor?.awaitTermination(200, TimeUnit.MILLISECONDS)
         } catch (e: Exception) {}
-        
+
         synchronized(landmarkLock) {
             faceLandmarker?.close(); faceLandmarker = null
             poseLandmarker?.close(); poseLandmarker = null
@@ -785,7 +844,7 @@ class TransformFragment : Fragment() {
         faceStylizer?.close(); faceStylizer = null
         tfliteInterpreter?.close(); tfliteInterpreter = null
         gpuDelegate?.close(); gpuDelegate = null
-        
+
         synchronized(inputBitmapLock) { inputBitmap?.recycle(); inputBitmap = null }
         lastStylizedBitmap?.recycle(); lastStylizedBitmap = null
         frameCache.values.forEach { if (!it.isRecycled) it.recycle() }; frameCache.clear()
