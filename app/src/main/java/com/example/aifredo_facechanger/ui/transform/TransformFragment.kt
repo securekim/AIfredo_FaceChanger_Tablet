@@ -88,9 +88,8 @@ class TransformFragment : Fragment() {
 
     private var trackOffsetX = 0f
     private var trackOffsetY = 0f
-    private var trackScaleRatio = 1f
     private var hasValidTrackOffset = false
-    private val TARGET_MULTIPLIER = 1.45f
+    private val TARGET_MULTIPLIER = 1.4f
 
     private var lastRawFx = 0f
     private var lastRawFy = 0f
@@ -103,9 +102,9 @@ class TransformFragment : Fragment() {
     @Volatile private var targetTransitionRatio: Float = 0f
     @Volatile private var currentCornerRatio: Float = 0f
 
-    private val filterX = OneEuroFilter(minCutoff = 1.0, beta = 0.02)
-    private val filterY = OneEuroFilter(minCutoff = 1.0, beta = 0.02)
-    private val filterSize = OneEuroFilter(minCutoff = 0.5, beta = 0.01)
+    private val filterX = OneEuroFilter(minCutoff = 5.0, beta = 0.6)
+    private val filterY = OneEuroFilter(minCutoff = 5.0, beta = 0.6)
+    private val filterSize = OneEuroFilter(minCutoff = 2.0, beta = 0.2)
 
     @Volatile private var filteredCenterX = 0f
     @Volatile private var filteredCenterY = 0f
@@ -191,7 +190,6 @@ class TransformFragment : Fragment() {
 
                 trackOffsetX = 0f
                 trackOffsetY = 0f
-                trackScaleRatio = 1f
                 hasValidTrackOffset = false
 
                 lastRawFx = 0f
@@ -422,7 +420,7 @@ class TransformFragment : Fragment() {
             val faceH = maxFy - minFy
 
             val rawCx = (minFx + maxFx) / 2f
-            val rawCy = (minFy + maxFy) / 2f - (faceH * 0.05f)
+            val rawCy = (minFy + maxFy) / 2f - (faceH * 0.10f)
             val rawSize = max(faceW, faceH) * TARGET_MULTIPLIER
 
             if (lastRawFs > 0f) {

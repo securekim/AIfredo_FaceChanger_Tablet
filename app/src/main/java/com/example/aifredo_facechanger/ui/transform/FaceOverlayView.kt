@@ -25,7 +25,7 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
     private var prevStylizedSize = 0f
 
     private var transitionStartTime = 0L
-    private val FADE_DURATION = 100f
+    private val FADE_DURATION = 30f
 
     private var shapeProgress = 0f
 
