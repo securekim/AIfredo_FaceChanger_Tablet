@@ -95,6 +95,7 @@ class TransformFragment : Fragment() {
     private var lastRawFy = 0f
     private var lastRawFs = 0f
     private var unstableFaceCounter = 0
+    private var faceStableCounter = 0
 
     private var faceDetectionStartTime: Long = 0
     private var lastTransitionUpdateTime: Long = 0
@@ -196,6 +197,7 @@ class TransformFragment : Fragment() {
                 lastRawFy = 0f
                 lastRawFs = 0f
                 unstableFaceCounter = 0
+                faceStableCounter = 0
             }
 
             val faceModel = "face_landmarker.task"
@@ -423,23 +425,59 @@ class TransformFragment : Fragment() {
             val rawCy = (minFy + maxFy) / 2f - (faceH * 0.10f)
             val rawSize = max(faceW, faceH) * TARGET_MULTIPLIER
 
-            if (lastRawFs > 0f) {
-                val sizeJump = abs(rawSize - lastRawFs) / lastRawFs
-                val posJump = sqrt((rawCx - lastRawFx).pow(2) + (rawCy - lastRawFy).pow(2)) / lastRawFs
+            var faceValidThisFrame = true
 
-                if (sizeJump < 0.15f && posJump < 0.15f) {
-                    isValidFace = true
-                    unstableFaceCounter = 0
-                } else {
-                    unstableFaceCounter++
-                    if (unstableFaceCounter > 4) {
+            // 1. 가로/세로 비율(Aspect Ratio) 강화 (0.7 미만 차단)
+            if (faceH > 0 && (faceW / faceH) < 0.7f) faceValidThisFrame = false
+
+            // 2 & 6. Pose 기반 검증
+            if (poseDetected && pSize > 0) {
+                // 2. Pose 기반 너비/높이 검증 (70% 미만 차단)
+                if (faceW < pSize * 0.7f || faceH < pSize * 0.7f) faceValidThisFrame = false
+                
+                // 6. 중심 편차 최소화 (Center Shift) (25% 초과 차단)
+                val centerDist = sqrt((rawCx - pCx).pow(2) + (rawCy - pCy).pow(2))
+                if (centerDist > pSize * 0.25f) {
+                    faceValidThisFrame = false
+                    // 5. 점프 방지 초기화 (포즈와 불일치 시 안정성 카운터 강제 초기화)
+                    faceStableCounter = 0
+                }
+            }
+
+            // 3. 내부 구조 정밀 검사 (눈 사이 거리가 얼굴 폭 대비 20% 미만 차단)
+            if (landmarks.size > 362) {
+                val eyeL = landmarks[133]
+                val eyeR = landmarks[362]
+                val eyeDist = sqrt(((eyeL.x() - eyeR.x()) * imgW).pow(2) + ((eyeL.y() - eyeR.y()) * imgH).pow(2))
+                if (eyeDist < faceW * 0.2f) faceValidThisFrame = false
+            }
+
+            // 4. Face Landmark 안정적 기준 강화 (15프레임 이상 유지)
+            if (faceValidThisFrame) {
+                faceStableCounter++
+            } else {
+                faceStableCounter = 0
+            }
+
+            if (faceStableCounter >= 15) {
+                if (lastRawFs > 0f) {
+                    val sizeJump = abs(rawSize - lastRawFs) / lastRawFs
+                    val posJump = sqrt((rawCx - lastRawFx).pow(2) + (rawCy - lastRawFy).pow(2)) / lastRawFs
+
+                    if (sizeJump < 0.15f && posJump < 0.15f) {
                         isValidFace = true
                         unstableFaceCounter = 0
+                    } else {
+                        unstableFaceCounter++
+                        if (unstableFaceCounter > 4) {
+                            isValidFace = true
+                            unstableFaceCounter = 0
+                        }
                     }
+                } else {
+                    isValidFace = true
+                    unstableFaceCounter = 0
                 }
-            } else {
-                isValidFace = true
-                unstableFaceCounter = 0
             }
 
             if (isValidFace) {
@@ -452,7 +490,7 @@ class TransformFragment : Fragment() {
                 lastRawFs = rawSize
             }
         } else {
-            if (lastRawFs == 0f) lastRawFs = 0f
+            faceStableCounter = 0
         }
 
         return when {
