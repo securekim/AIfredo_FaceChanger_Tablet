@@ -30,7 +30,6 @@ import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.support.common.ops.NormalizeOp
 import org.tensorflow.lite.support.image.ImageProcessor
@@ -41,9 +40,9 @@ import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import java.text.SimpleDateFormat
 import java.util.*
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import kotlin.math.*
 
@@ -53,8 +52,8 @@ class TransformFragment : Fragment() {
     private val binding get() = _binding!!
 
     private var cameraExecutor: ExecutorService? = null
-    private var stylizerExecutor: ExecutorService? = null
     private var backgroundExecutor: ExecutorService? = null
+    private var pipelineExecutor: ExecutorService? = null
 
     private val landmarkLock = Any()
     @Volatile private var faceLandmarker: FaceLandmarker? = null
@@ -67,7 +66,6 @@ class TransformFragment : Fragment() {
     private var modelInputWidth = 256
     private var modelInputHeight = 256
 
-    @Volatile private var lastStylizedBitmap: Bitmap? = null
     @Volatile private var lastStylizedCenterX = 0f
     @Volatile private var lastStylizedCenterY = 0f
     @Volatile private var lastStylizedSize = 0f
@@ -76,10 +74,12 @@ class TransformFragment : Fragment() {
     private var inputBitmap: Bitmap? = null
     private var modelOutputBuffer: java.nio.ByteBuffer? = null
 
-    private val frameCache = ConcurrentHashMap<Long, Bitmap>()
-    @Volatile private var lastPoseResult: PoseLandmarkerResult? = null
-    @Volatile private var lastFaceResult: FaceLandmarkerResult? = null
-    @Volatile private var isStylizing = false
+    private data class FrameData(val bitmap: Bitmap, val timestamp: Long)
+    private val frameQueue = LinkedBlockingQueue<FrameData>(150)
+
+    private var lastProcessedOriginal: Bitmap? = null
+    private var lastProcessedStylized: Bitmap? = null
+
     @Volatile private var isReady = false
 
     private var lastValidFaceResult: FaceLandmarkerResult? = null
@@ -130,7 +130,6 @@ class TransformFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         cameraExecutor = Executors.newSingleThreadExecutor()
-        stylizerExecutor = Executors.newSingleThreadExecutor()
         backgroundExecutor = Executors.newSingleThreadExecutor()
 
         loadSettings()
@@ -178,8 +177,6 @@ class TransformFragment : Fragment() {
                 faceLandmarker = null
                 poseLandmarker?.close()
                 poseLandmarker = null
-                lastFaceResult = null
-                lastPoseResult = null
                 lastValidFaceResult = null
                 faceLossCounter = 0
                 faceDetectionStartTime = 0
@@ -198,6 +195,9 @@ class TransformFragment : Fragment() {
                 unstableFaceCounter = 0
             }
 
+            frameQueue.forEach { it.bitmap.recycle() }
+            frameQueue.clear()
+
             val faceModel = "face_landmarker.task"
             val poseModel = "pose_landmarker_lite.task"
             val faceDelegate = if (faceDelegatePref == "GPU") Delegate.GPU else Delegate.CPU
@@ -206,53 +206,13 @@ class TransformFragment : Fragment() {
             val newFaceLandmarker = if (useFaceLandmarkPref) {
                 FaceLandmarker.createFromOptions(context, FaceLandmarker.FaceLandmarkerOptions.builder()
                     .setBaseOptions(BaseOptions.builder().setDelegate(faceDelegate).setModelAssetPath(faceModel).build())
-                    .setRunningMode(RunningMode.LIVE_STREAM)
-                    .setResultListener { result, _ ->
-                        lastFaceResult = result
-                        val currentTime = System.currentTimeMillis()
-
-                        val deltaTime = if (lastTransitionUpdateTime == 0L) 0L else currentTime - lastTransitionUpdateTime
-                        lastTransitionUpdateTime = currentTime
-
-                        val step = (deltaTime / 1000f) * 3.5f
-
-                        if (result.faceLandmarks().isNotEmpty()) {
-                            lastValidFaceResult = result
-                            faceLossCounter = 0
-
-                            if (faceDetectionStartTime == 0L) {
-                                faceDetectionStartTime = currentTime
-                            } else if (currentTime - faceDetectionStartTime > 100L) {
-                                targetTransitionRatio = 1f
-                            }
-                        } else {
-                            faceLossCounter++
-
-                            if (faceLossCounter > 3) {
-                                faceDetectionStartTime = 0
-                                targetTransitionRatio = 0f
-                            }
-                        }
-
-                        if (rawTransitionRatio < targetTransitionRatio) {
-                            rawTransitionRatio = (rawTransitionRatio + step).coerceAtMost(targetTransitionRatio)
-                        } else if (rawTransitionRatio > targetTransitionRatio) {
-                            rawTransitionRatio = (rawTransitionRatio - step).coerceAtLeast(targetTransitionRatio)
-                        }
-
-                        val t = rawTransitionRatio
-                        currentCornerRatio = t * t * (3 - 2 * t)
-                    }
+                    .setRunningMode(RunningMode.VIDEO)
                     .build())
             } else null
 
             val newPoseLandmarker = PoseLandmarker.createFromOptions(context, PoseLandmarker.PoseLandmarkerOptions.builder()
                 .setBaseOptions(BaseOptions.builder().setDelegate(poseDelegate).setModelAssetPath(poseModel).build())
-                .setRunningMode(RunningMode.LIVE_STREAM)
-                .setResultListener { result, _ ->
-                    lastPoseResult = result
-                    processFrame(result.timestampMs())
-                }
+                .setRunningMode(RunningMode.VIDEO)
                 .build())
 
             synchronized(landmarkLock) {
@@ -269,9 +229,29 @@ class TransformFragment : Fragment() {
 
             isReady = true
             activity?.runOnUiThread { addLog("--- ALL SYSTEMS READY ---") }
+            startPipeline()
         } catch (e: Exception) {
             activity?.runOnUiThread { addLog("Initialization Error: ${e.message}") }
             Log.e(TAG, "Initialization Error", e)
+        }
+    }
+
+    private fun startPipeline() {
+        pipelineExecutor?.shutdownNow()
+        pipelineExecutor = Executors.newSingleThreadExecutor()
+        pipelineExecutor?.execute {
+            try {
+                while (!Thread.currentThread().isInterrupted) {
+                    val frameData = frameQueue.take()
+                    if (!isReady) {
+                        frameData.bitmap.recycle()
+                        continue
+                    }
+                    processSingleFrameSynchronously(frameData)
+                }
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
         }
     }
 
@@ -370,13 +350,64 @@ class TransformFragment : Fragment() {
         }
     }
 
-    private fun processFrame(ts: Long) {
-        if (!isReady) return
-        val capturedBmp = frameCache[ts] ?: return
-        if (capturedBmp.isRecycled) return
+    private fun updateTransitionLogic(result: FaceLandmarkerResult?, currentTime: Long) {
+        val deltaTime = if (lastTransitionUpdateTime == 0L) 0L else currentTime - lastTransitionUpdateTime
+        lastTransitionUpdateTime = currentTime
+        val step = (deltaTime / 1000f) * 3.5f
 
-        val faceResult = if (useFaceLandmarkPref) lastFaceResult else null
-        val (rawX, rawY, rawS) = calculateStableCrop(faceResult, lastPoseResult, capturedBmp.width, capturedBmp.height)
+        if (result != null && result.faceLandmarks().isNotEmpty()) {
+            lastValidFaceResult = result
+            faceLossCounter = 0
+
+            if (faceDetectionStartTime == 0L) {
+                faceDetectionStartTime = currentTime
+            } else if (currentTime - faceDetectionStartTime > 100L) {
+                targetTransitionRatio = 1f
+            }
+        } else {
+            faceLossCounter++
+            if (faceLossCounter > 3) {
+                faceDetectionStartTime = 0
+                targetTransitionRatio = 0f
+            }
+        }
+
+        if (rawTransitionRatio < targetTransitionRatio) {
+            rawTransitionRatio = (rawTransitionRatio + step).coerceAtMost(targetTransitionRatio)
+        } else if (rawTransitionRatio > targetTransitionRatio) {
+            rawTransitionRatio = (rawTransitionRatio - step).coerceAtLeast(targetTransitionRatio)
+        }
+
+        val t = rawTransitionRatio
+        currentCornerRatio = t * t * (3 - 2 * t)
+    }
+
+    private fun processSingleFrameSynchronously(frameData: FrameData) {
+        val bmp = frameData.bitmap
+        val ts = frameData.timestamp
+
+        var faceResult: FaceLandmarkerResult? = null
+        var poseResult: PoseLandmarkerResult? = null
+
+        try {
+            val mpImage = BitmapImageBuilder(bmp).build()
+            synchronized(landmarkLock) {
+                if (isReady) {
+                    if (useFaceLandmarkPref && faceLandmarker != null) {
+                        faceResult = faceLandmarker?.detectForVideo(mpImage, ts)
+                    }
+                    if (poseLandmarker != null) {
+                        poseResult = poseLandmarker?.detectForVideo(mpImage, ts)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Landmark Sync Error", e)
+        }
+
+        updateTransitionLogic(faceResult, ts)
+
+        val (rawX, rawY, rawS) = calculateStableCrop(faceResult, poseResult, bmp.width, bmp.height)
 
         if (rawS > 0) {
             filteredCenterX = filterX.filter(rawX.toDouble(), ts).toFloat()
@@ -384,8 +415,40 @@ class TransformFragment : Fragment() {
             filteredSize = filterSize.filter(rawS.toDouble(), ts).toFloat()
         }
 
-        if (!isStylizing && filteredSize > 10) {
-            performStylization(capturedBmp, filteredCenterX, filteredCenterY, filteredSize)
+        var stylizedBmp: Bitmap? = null
+        if (filteredSize > 10) {
+            stylizedBmp = performStylizationSync(bmp, filteredCenterX, filteredCenterY, filteredSize)
+        }
+
+        if (stylizedBmp != null) {
+            lastStylizedCenterX = filteredCenterX
+            lastStylizedCenterY = filteredCenterY
+            lastStylizedSize = filteredSize
+        }
+
+        activity?.runOnUiThread {
+            if (_binding != null) {
+                binding.faceOverlay.updateFrame(
+                    original = bmp,
+                    stylized = stylizedBmp,
+                    sCenter = PointF(filteredCenterX, filteredCenterY),
+                    sSize = filteredSize,
+                    curFace = faceResult,
+                    curPose = poseResult,
+                    mode = renderMode,
+                    isFaceActive = useFaceLandmarkPref,
+                    shapeProgress = currentCornerRatio
+                )
+
+                lastProcessedOriginal?.recycle()
+                lastProcessedStylized?.recycle()
+
+                lastProcessedOriginal = bmp
+                lastProcessedStylized = stylizedBmp
+            } else {
+                bmp.recycle()
+                stylizedBmp?.recycle()
+            }
         }
     }
 
@@ -586,41 +649,6 @@ class TransformFragment : Fragment() {
         return output
     }
 
-    private fun quantizeColorsKMeans(pixels: IntArray, k: Int) {
-        if (pixels.isEmpty()) return
-        val random = Random(0L)
-        val meansR = IntArray(k); val meansG = IntArray(k); val meansB = IntArray(k)
-        for (i in 0 until k) {
-            val c = pixels[random.nextInt(pixels.size)]
-            meansR[i] = (c shr 16) and 0xFF; meansG[i] = (c shr 8) and 0xFF; meansB[i] = c and 0xFF
-        }
-        val assignments = IntArray(pixels.size)
-        repeat(2) {
-            for (i in pixels.indices) {
-                val c = pixels[i]; val cr = (c shr 16) and 0xFF; val cg = (c shr 8) and 0xFF; val cb = c and 0xFF
-                var minDistSq = Int.MAX_VALUE; var bestK = 0
-                for (j in 0 until k) {
-                    val dr = cr - meansR[j]; val dg = cg - meansG[j]; val db = cb - meansB[j]
-                    val dSq = dr * dr + dg * dg + db * db
-                    if (dSq < minDistSq) { minDistSq = dSq; bestK = j }
-                }
-                assignments[i] = bestK
-            }
-            val sumR = LongArray(k); val sumG = LongArray(k); val sumB = LongArray(k); val counts = IntArray(k)
-            for (i in pixels.indices) {
-                val c = pixels[i]; val ki = assignments[i]
-                sumR[ki] += ((c shr 16) and 0xFF).toLong(); sumG[ki] += ((c shr 8) and 0xFF).toLong(); sumB[ki] += (c and 0xFF).toLong(); counts[ki]++
-            }
-            for (j in 0 until k) if (counts[j] > 0) {
-                meansR[j] = (sumR[j] / counts[j]).toInt(); meansG[j] = (sumG[j] / counts[j]).toInt(); meansB[j] = (sumB[j] / counts[j]).toInt()
-            }
-        }
-        for (i in pixels.indices) {
-            val ki = assignments[i]
-            pixels[i] = 0xFF000000.toInt() or (meansR[ki] shl 16) or (meansG[ki] shl 8) or meansB[ki]
-        }
-    }
-
     private fun extractEdges(pixels: IntArray, w: Int, h: Int): IntArray {
         val gray = IntArray(pixels.size)
         for (i in pixels.indices) {
@@ -662,75 +690,68 @@ class TransformFragment : Fragment() {
         return edges
     }
 
-    private fun performStylization(targetBmp: Bitmap, centerXPx: Float, centerYPx: Float, sizePx: Float) {
-        if (!isReady || targetBmp.isRecycled) return
-        isStylizing = true
-        stylizerExecutor?.execute {
-            try {
-                if (!isReady || targetBmp.isRecycled || sizePx <= 1) return@execute
-                val intSize = sizePx.toInt().coerceAtLeast(1)
-                val left = centerXPx - sizePx / 2f
-                val top = centerYPx - sizePx / 2f
-                val faceBmp = Bitmap.createBitmap(intSize, intSize, Bitmap.Config.ARGB_8888)
-                val canvas = Canvas(faceBmp)
-                val shader = BitmapShader(targetBmp, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
-                val paint = Paint().apply { isFilterBitmap = true; setShader(shader) }
-                val m = Matrix(); m.postTranslate(-left, -top); shader.setLocalMatrix(m)
-                canvas.drawRect(0f, 0f, intSize.toFloat(), intSize.toFloat(), paint)
+    private fun performStylizationSync(targetBmp: Bitmap, centerXPx: Float, centerYPx: Float, sizePx: Float): Bitmap? {
+        if (!isReady || targetBmp.isRecycled || sizePx <= 1) return null
+        val intSize = sizePx.toInt().coerceAtLeast(1)
+        val left = centerXPx - sizePx / 2f
+        val top = centerYPx - sizePx / 2f
+        val faceBmp = Bitmap.createBitmap(intSize, intSize, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(faceBmp)
+        val shader = BitmapShader(targetBmp, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+        val paint = Paint().apply { isFilterBitmap = true; setShader(shader) }
+        val m = Matrix(); m.postTranslate(-left, -top); shader.setLocalMatrix(m)
+        canvas.drawRect(0f, 0f, intSize.toFloat(), intSize.toFloat(), paint)
 
-                var resultBmp: Bitmap? = null
+        var resultBmp: Bitmap? = null
 
-                if (currentModelPref == "SEMI_Filter") {
-                    resultBmp = applySemiFilter(faceBmp); faceBmp.recycle()
-                } else if (tfliteInterpreter != null) {
-                    val interpreter = tfliteInterpreter!!
-                    val inputTensor = interpreter.getInputTensor(0)
-                    val h = inputTensor.shape()[1]; val w = inputTensor.shape()[2]
-                    val scaledFace = Bitmap.createScaledBitmap(faceBmp, w, h, true); faceBmp.recycle()
-                    val tensorImage = TensorImage(inputTensor.dataType()); tensorImage.load(scaledFace)
-                    val processor = ImageProcessor.Builder().add(ResizeOp(h, w, ResizeOp.ResizeMethod.BILINEAR)).apply { if (inputTensor.dataType() == DataType.FLOAT32) add(NormalizeOp(0f, 255f)) }.build()
-                    val inputBuffer = processor.process(tensorImage).buffer
-                    val outputTensor = interpreter.getOutputTensor(0); val outH = outputTensor.shape()[1]; val outW = outputTensor.shape()[2]
-                    val isFloatOutput = outputTensor.dataType() == DataType.FLOAT32
-                    val bufferSize = outH * outW * 3 * (if (isFloatOutput) 4 else 1)
-                    if (modelOutputBuffer == null || modelOutputBuffer!!.capacity() != bufferSize) modelOutputBuffer = java.nio.ByteBuffer.allocateDirect(bufferSize).order(java.nio.ByteOrder.nativeOrder())
-                    val outputBuffer = modelOutputBuffer!!; outputBuffer.rewind()
-                    try { interpreter.run(inputBuffer, outputBuffer) } catch (e: Exception) { interpreter.allocateTensors(); outputBuffer.rewind(); interpreter.run(inputBuffer, outputBuffer) }
-                    outputBuffer.rewind(); val pixelCount = outW * outH; val pixels = IntArray(pixelCount)
-                    if (isFloatOutput) {
-                        val outputFloats = FloatArray(pixelCount * 3); outputBuffer.asFloatBuffer().get(outputFloats)
-                        for (i in 0 until pixelCount) {
-                            val r = (outputFloats[i * 3] * 255).toInt().coerceIn(0, 255)
-                            val g = (outputFloats[i * 3 + 1] * 255).toInt().coerceIn(0, 255)
-                            val b = (outputFloats[i * 3 + 2] * 255).toInt().coerceIn(0, 255)
-                            pixels[i] = -0x1000000 or (r shl 16) or (g shl 8) or b
-                        }
-                    } else {
-                        val outputBytes = ByteArray(pixelCount * 3); outputBuffer.get(outputBytes)
-                        for (i in 0 until pixelCount) {
-                            val r = outputBytes[i * 3].toInt() and 0xFF; val g = outputBytes[i * 3 + 1].toInt() and 0xFF; val b = outputBytes[i * 3 + 2].toInt() and 0xFF
-                            pixels[i] = -0x1000000 or (r shl 16) or (g shl 8) or b
-                        }
+        try {
+            if (currentModelPref == "SEMI_Filter") {
+                resultBmp = applySemiFilter(faceBmp); faceBmp.recycle()
+            } else if (tfliteInterpreter != null) {
+                val interpreter = tfliteInterpreter!!
+                val inputTensor = interpreter.getInputTensor(0)
+                val h = inputTensor.shape()[1]; val w = inputTensor.shape()[2]
+                val scaledFace = Bitmap.createScaledBitmap(faceBmp, w, h, true); faceBmp.recycle()
+                val tensorImage = TensorImage(inputTensor.dataType()); tensorImage.load(scaledFace)
+                val processor = ImageProcessor.Builder().add(ResizeOp(h, w, ResizeOp.ResizeMethod.BILINEAR)).apply { if (inputTensor.dataType() == DataType.FLOAT32) add(NormalizeOp(0f, 255f)) }.build()
+                val inputBuffer = processor.process(tensorImage).buffer
+                val outputTensor = interpreter.getOutputTensor(0); val outH = outputTensor.shape()[1]; val outW = outputTensor.shape()[2]
+                val isFloatOutput = outputTensor.dataType() == DataType.FLOAT32
+                val bufferSize = outH * outW * 3 * (if (isFloatOutput) 4 else 1)
+                if (modelOutputBuffer == null || modelOutputBuffer!!.capacity() != bufferSize) modelOutputBuffer = java.nio.ByteBuffer.allocateDirect(bufferSize).order(java.nio.ByteOrder.nativeOrder())
+                val outputBuffer = modelOutputBuffer!!; outputBuffer.rewind()
+                try { interpreter.run(inputBuffer, outputBuffer) } catch (e: Exception) { interpreter.allocateTensors(); outputBuffer.rewind(); interpreter.run(inputBuffer, outputBuffer) }
+                outputBuffer.rewind(); val pixelCount = outW * outH; val pixels = IntArray(pixelCount)
+                if (isFloatOutput) {
+                    val outputFloats = FloatArray(pixelCount * 3); outputBuffer.asFloatBuffer().get(outputFloats)
+                    for (i in 0 until pixelCount) {
+                        val r = (outputFloats[i * 3] * 255).toInt().coerceIn(0, 255)
+                        val g = (outputFloats[i * 3 + 1] * 255).toInt().coerceIn(0, 255)
+                        val b = (outputFloats[i * 3 + 2] * 255).toInt().coerceIn(0, 255)
+                        pixels[i] = -0x1000000 or (r shl 16) or (g shl 8) or b
                     }
-                    resultBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888); resultBmp.setPixels(pixels, 0, outW, 0, 0, outW, outH)
-                    scaledFace.recycle()
-                } else if (faceStylizer != null) {
-                    val scaledFace = Bitmap.createScaledBitmap(faceBmp, modelInputWidth, modelInputHeight, true); faceBmp.recycle()
-                    val stylizedResult = faceStylizer!!.stylize(BitmapImageBuilder(scaledFace).build())
-                    stylizedResult?.stylizedImage()?.let { optional -> if (optional.isPresent) {
-                        resultBmp = BitmapExtractor.extract(optional.get())
-                    } }
-                    scaledFace.recycle()
-                } else faceBmp.recycle()
-
-                resultBmp?.let { res ->
-                    activity?.runOnUiThread {
-                        lastStylizedBitmap = res
-                        lastStylizedCenterX = centerXPx; lastStylizedCenterY = centerYPx; lastStylizedSize = sizePx
+                } else {
+                    val outputBytes = ByteArray(pixelCount * 3); outputBuffer.get(outputBytes)
+                    for (i in 0 until pixelCount) {
+                        val r = outputBytes[i * 3].toInt() and 0xFF; val g = outputBytes[i * 3 + 1].toInt() and 0xFF; val b = outputBytes[i * 3 + 2].toInt() and 0xFF
+                        pixels[i] = -0x1000000 or (r shl 16) or (g shl 8) or b
                     }
                 }
-            } catch (e: Exception) { Log.e(TAG, "Stylize Error", e) } finally { isStylizing = false }
+                resultBmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888); resultBmp.setPixels(pixels, 0, outW, 0, 0, outW, outH)
+                scaledFace.recycle()
+            } else if (faceStylizer != null) {
+                val scaledFace = Bitmap.createScaledBitmap(faceBmp, modelInputWidth, modelInputHeight, true); faceBmp.recycle()
+                val stylizedResult = faceStylizer!!.stylize(BitmapImageBuilder(scaledFace).build())
+                stylizedResult?.stylizedImage()?.let { optional -> if (optional.isPresent) {
+                    resultBmp = BitmapExtractor.extract(optional.get())
+                } }
+                scaledFace.recycle()
+            } else faceBmp.recycle()
+        } catch (e: Exception) {
+            Log.e(TAG, "Stylize Error", e)
         }
+
+        return resultBmp
     }
 
     private fun analyzeFrame(imageProxy: ImageProxy) {
@@ -751,33 +772,11 @@ class TransformFragment : Fragment() {
         if (newFrame == null) { imageProxy.close(); return }
 
         val ts = System.currentTimeMillis()
-        frameCache[ts] = newFrame
 
-        val iterator = frameCache.keys.iterator()
-        while (iterator.hasNext()) {
-            val key = iterator.next()
-            if (key < ts - 1500) { frameCache[key]?.let { if (!it.isRecycled) it.recycle() }; iterator.remove() }
+        if (!frameQueue.offer(FrameData(newFrame, ts))) {
+            newFrame.recycle()
         }
 
-        try {
-            val mpImage = BitmapImageBuilder(newFrame).build()
-            synchronized(landmarkLock) {
-                if (isReady) {
-                    faceLandmarker?.detectAsync(mpImage, ts)
-                    poseLandmarker?.detectAsync(mpImage, ts)
-                }
-            }
-        } catch (e: Exception) { Log.e(TAG, "Detection trigger error", e) }
-
-        activity?.runOnUiThread {
-            if (_binding != null) {
-                binding.faceOverlay.updateFrame(
-                    original = newFrame, stylized = lastStylizedBitmap, sCenter = PointF(filteredCenterX, filteredCenterY),
-                    sSize = filteredSize, curFace = lastFaceResult, curPose = lastPoseResult, mode = renderMode,
-                    isFaceActive = useFaceLandmarkPref, shapeProgress = currentCornerRatio
-                )
-            }
-        }
         imageProxy.close()
     }
 
@@ -814,11 +813,11 @@ class TransformFragment : Fragment() {
         isReady = false
         super.onDestroyView()
         cameraExecutor?.shutdown()
-        stylizerExecutor?.shutdown()
         backgroundExecutor?.shutdown()
+        pipelineExecutor?.shutdownNow()
+
         try {
             cameraExecutor?.awaitTermination(200, TimeUnit.MILLISECONDS)
-            stylizerExecutor?.awaitTermination(200, TimeUnit.MILLISECONDS)
         } catch (e: Exception) {}
 
         synchronized(landmarkLock) {
@@ -830,8 +829,13 @@ class TransformFragment : Fragment() {
         gpuDelegate?.close(); gpuDelegate = null
 
         synchronized(inputBitmapLock) { inputBitmap?.recycle(); inputBitmap = null }
-        lastStylizedBitmap?.recycle(); lastStylizedBitmap = null
-        frameCache.values.forEach { if (!it.isRecycled) it.recycle() }; frameCache.clear()
+
+        frameQueue.forEach { it.bitmap.recycle() }
+        frameQueue.clear()
+
+        lastProcessedOriginal?.recycle(); lastProcessedOriginal = null
+        lastProcessedStylized?.recycle(); lastProcessedStylized = null
+
         _binding = null
     }
 
