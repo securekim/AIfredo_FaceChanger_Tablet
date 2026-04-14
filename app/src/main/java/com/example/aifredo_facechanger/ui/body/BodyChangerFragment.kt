@@ -83,6 +83,7 @@ class BodyChangerFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
+        // onResume에서 설정을 다시 로드하고 세그멘터를 재설정하여 변경사항을 즉시 반영합니다.
         loadSettings()
         setupSegmenter()
     }
@@ -102,15 +103,18 @@ class BodyChangerFragment : Fragment() {
             startColor = Color.RED
             endColor = Color.BLUE
         }
+        Log.d(TAG, "Settings loaded: model=$bodyModel, delegate=$bodyDelegate")
     }
 
     private fun setupSegmenter() {
+        // 기존 리소스 해제
         imageSegmenter?.close(); imageSegmenter = null
         mlKitSegmenter?.close(); mlKitSegmenter = null
         yoloInterpreter?.close(); yoloInterpreter = null
         gpuDelegate?.close(); gpuDelegate = null
 
-        addLog("Initializing Segmenter: $bodyModel ($bodyDelegate)")
+        // UI 로그에 현재 선택된 모델 정보를 명확히 출력
+        addLog("Initializing Segmenter: Current selection is [$bodyModel] ($bodyDelegate)")
 
         when (bodyModel) {
             "MediaPipe" -> {
@@ -139,18 +143,22 @@ class BodyChangerFragment : Fragment() {
                         .build()
                     
                     imageSegmenter = ImageSegmenter.createFromOptions(requireContext(), options)
-                    addLog("MediaPipe Segmenter Ready")
+                    addLog(">> MediaPipe Segmenter Ready")
                 } catch (e: Exception) {
                     addLog("MediaPipe Error: ${e.message}")
                     Log.e(TAG, "MediaPipe init error", e)
                 }
             }
             "ML Kit" -> {
-                val options = SelfieSegmenterOptions.Builder()
-                    .setDetectorMode(SelfieSegmenterOptions.STREAM_MODE)
-                    .build()
-                mlKitSegmenter = Segmentation.getClient(options)
-                addLog("ML Kit Segmenter Ready")
+                try {
+                    val options = SelfieSegmenterOptions.Builder()
+                        .setDetectorMode(SelfieSegmenterOptions.STREAM_MODE)
+                        .build()
+                    mlKitSegmenter = Segmentation.getClient(options)
+                    addLog(">> ML Kit Segmenter Ready")
+                } catch (e: Exception) {
+                    addLog("ML Kit Error: ${e.message}")
+                }
             }
             "YOLO" -> {
                 try {
@@ -163,11 +171,14 @@ class BodyChangerFragment : Fragment() {
                     }
                     val modelBuffer = loadModelFile(requireContext().assets, "AIfredo_epoch150_Loss28.task")
                     yoloInterpreter = Interpreter(modelBuffer, options)
-                    addLog("YOLO Segmenter Ready")
+                    addLog(">> YOLO Segmenter Ready")
                 } catch (e: Exception) {
                     addLog("YOLO Error: ${e.message}")
                     Log.e(TAG, "YOLO init error", e)
                 }
+            }
+            else -> {
+                addLog("Warning: Unknown model [$bodyModel], defaulting to MediaPipe")
             }
         }
     }
@@ -222,6 +233,7 @@ class BodyChangerFragment : Fragment() {
             return
         }
 
+        // 현재 설정된 bodyModel에 따라 실제 엔진이 구동됩니다.
         when (bodyModel) {
             "MediaPipe" -> {
                 val mpImage = BitmapImageBuilder(bitmap).build()
@@ -318,8 +330,8 @@ class BodyChangerFragment : Fragment() {
             _binding?.let { b ->
                 val timestamp = sdf.format(Date())
                 val currentLog = b.eventLog.text.toString()
+                // 새 로그를 상단에 추가하여 즉시 확인 가능하도록 함
                 b.eventLog.text = "[$timestamp] $message\n${currentLog.take(1000)}"
-                // Scroll to top or handle scrolling if needed, but for now just prepending is fine
             }
         }
     }
