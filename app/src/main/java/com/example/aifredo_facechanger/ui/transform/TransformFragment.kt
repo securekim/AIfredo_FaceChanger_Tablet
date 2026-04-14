@@ -30,7 +30,6 @@ import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.support.common.ops.NormalizeOp
 import org.tensorflow.lite.support.image.ImageProcessor
@@ -84,7 +83,6 @@ class TransformFragment : Fragment() {
 
     private var lastValidFaceResult: FaceLandmarkerResult? = null
     private var faceLossCounter = 0
-    private val FACE_HOLD_MAX_FRAMES = 10
 
     private var trackOffsetX = 0f
     private var trackOffsetY = 0f
@@ -95,8 +93,8 @@ class TransformFragment : Fragment() {
     private var lastRawFy = 0f
     private var lastRawFs = 0f
     private var unstableFaceCounter = 0
+    private var faceStableCounter = 0
 
-    private var faceDetectionStartTime: Long = 0
     private var lastTransitionUpdateTime: Long = 0
     @Volatile private var rawTransitionRatio: Float = 0f
     @Volatile private var targetTransitionRatio: Float = 0f
@@ -182,7 +180,6 @@ class TransformFragment : Fragment() {
                 lastPoseResult = null
                 lastValidFaceResult = null
                 faceLossCounter = 0
-                faceDetectionStartTime = 0
                 lastTransitionUpdateTime = 0
                 rawTransitionRatio = 0f
                 targetTransitionRatio = 0f
@@ -196,6 +193,7 @@ class TransformFragment : Fragment() {
                 lastRawFy = 0f
                 lastRawFs = 0f
                 unstableFaceCounter = 0
+                faceStableCounter = 0
             }
 
             val faceModel = "face_landmarker.task"
@@ -220,16 +218,15 @@ class TransformFragment : Fragment() {
                             lastValidFaceResult = result
                             faceLossCounter = 0
 
-                            if (faceDetectionStartTime == 0L) {
-                                faceDetectionStartTime = currentTime
-                            } else if (currentTime - faceDetectionStartTime > 100L) {
+                            // 최근 20프레임 동안 한 번도 안 끊기고 계속 잡혔을 때만 스타일 적용 (깜빡임 방지)
+                            if (faceStableCounter >= 20) {
                                 targetTransitionRatio = 1f
                             }
                         } else {
                             faceLossCounter++
+                            // faceStableCounter는 calculateStableCrop에서 detection 없을 시 0으로 초기화됨
 
                             if (faceLossCounter > 3) {
-                                faceDetectionStartTime = 0
                                 targetTransitionRatio = 0f
                             }
                         }
@@ -394,15 +391,27 @@ class TransformFragment : Fragment() {
         var pCx = 0f; var pCy = 0f; var pSize = 0f
 
         if (poseDetected) {
-            val headPoints = poseRes!!.landmarks()[0].take(11)
-            val minPx = headPoints.minOf { it.x() } * imgW
-            val maxPx = headPoints.maxOf { it.x() } * imgW
-            val minPy = headPoints.minOf { it.y() } * imgH
-            val maxPy = headPoints.maxOf { it.y() } * imgH
+            val landmarks = poseRes!!.landmarks()[0]
+            val nose = landmarks[0]
+            val earL = landmarks[7]
+            val earR = landmarks[8]
 
-            pCx = (minPx + maxPx) / 2f
-            pCy = (minPy + maxPy) / 2f
-            pSize = max(maxPx - minPx, maxPy - minPy)
+            // 측면에서도 비교적 일정하게 유지되는 코(0번)와 귀(7, 8번) 사이의 거리를 사용해 크기 산출
+            val dL = sqrt(((nose.x() - earL.x()) * imgW).pow(2) + ((nose.y() - earL.y()) * imgH).pow(2))
+            val dR = sqrt(((nose.x() - earR.x()) * imgW).pow(2) + ((nose.y() - earR.y()) * imgH).pow(2))
+            
+            // 코와 양쪽 귀 사이의 거리 중 최대값을 기준으로 삼아 측면 회전 시에도 일정한 스케일을 유지
+            val refDist = max(dL, dR)
+
+            // 카메라와 얼굴이 가까울 때(refDist가 클 때) 광각 렌즈 왜곡 등으로 인해 바운딩 박스가 작아지는 현상을 보정
+            // 화면에서 얼굴이 차지하는 비율(closeness)에 따라 배율을 동적으로 증가시킴
+            val closeness = (refDist / imgW).coerceIn(0f, 1f)
+            val adaptiveMultiplier = 2.2f + (closeness * 1.0f) // 가까울수록 2.2 -> 3.2까지 증가
+
+            pCx = nose.x() * imgW
+            // 코에서 위쪽으로 보정하여 머리 윗부분(정수리) 공간을 확보. 보정치도 refDist에 비례하여 조정.
+            pCy = (nose.y() * imgH) - (refDist * 0.35f) 
+            pSize = refDist * adaptiveMultiplier
         }
 
         val faceDetected = faceRes?.faceLandmarks()?.isNotEmpty() == true
@@ -423,23 +432,58 @@ class TransformFragment : Fragment() {
             val rawCy = (minFy + maxFy) / 2f - (faceH * 0.10f)
             val rawSize = max(faceW, faceH) * TARGET_MULTIPLIER
 
-            if (lastRawFs > 0f) {
-                val sizeJump = abs(rawSize - lastRawFs) / lastRawFs
-                val posJump = sqrt((rawCx - lastRawFx).pow(2) + (rawCy - lastRawFy).pow(2)) / lastRawFs
+            var faceValidThisFrame = true
 
-                if (sizeJump < 0.15f && posJump < 0.15f) {
-                    isValidFace = true
-                    unstableFaceCounter = 0
-                } else {
-                    unstableFaceCounter++
-                    if (unstableFaceCounter > 4) {
+            // 1. 가로/세로 비율(Aspect Ratio) (0.7 미만 차단)
+            if (faceH > 0 && (faceW / faceH) < 0.7f) faceValidThisFrame = false
+
+            // 2 & 6. Pose 기반 검증 (새로운 pSize 기준에 맞춰 조정)
+            if (poseDetected && pSize > 0) {
+                // 2. Pose 기반 크기 검증 (얼굴 영역이 포즈 기준의 일정 비율 이상이어야 함)
+                if (faceW < pSize * 0.4f || faceH < pSize * 0.4f) faceValidThisFrame = false
+                
+                // 6. 중심 편차 최소화
+                val centerDist = sqrt((rawCx - pCx).pow(2) + (rawCy - pCy).pow(2))
+                if (centerDist > pSize * 0.6f) {
+                    faceValidThisFrame = false
+                    faceStableCounter = 0
+                }
+            }
+
+            // 3. 내부 구조 정밀 검사
+            if (landmarks.size > 362) {
+                val eyeL = landmarks[133]
+                val eyeR = landmarks[362]
+                val eyeDist = sqrt(((eyeL.x() - eyeR.x()) * imgW).pow(2) + ((eyeL.y() - eyeR.y()) * imgH).pow(2))
+                if (eyeDist < faceW * 0.15f) faceValidThisFrame = false
+            }
+
+            // 20프레임 이상 연속 감지 확인
+            if (faceValidThisFrame) {
+                faceStableCounter++
+            } else {
+                faceStableCounter = 0
+            }
+
+            if (faceStableCounter >= 20) {
+                if (lastRawFs > 0f) {
+                    val sizeJump = abs(rawSize - lastRawFs) / lastRawFs
+                    val posJump = sqrt((rawCx - lastRawFx).pow(2) + (rawCy - lastRawFy).pow(2)) / lastRawFs
+
+                    if (sizeJump < 0.15f && posJump < 0.15f) {
                         isValidFace = true
                         unstableFaceCounter = 0
+                    } else {
+                        unstableFaceCounter++
+                        if (unstableFaceCounter > 4) {
+                            isValidFace = true
+                            unstableFaceCounter = 0
+                        }
                     }
+                } else {
+                    isValidFace = true
+                    unstableFaceCounter = 0
                 }
-            } else {
-                isValidFace = true
-                unstableFaceCounter = 0
             }
 
             if (isValidFace) {
@@ -452,7 +496,7 @@ class TransformFragment : Fragment() {
                 lastRawFs = rawSize
             }
         } else {
-            if (lastRawFs == 0f) lastRawFs = 0f
+            faceStableCounter = 0
         }
 
         return when {
