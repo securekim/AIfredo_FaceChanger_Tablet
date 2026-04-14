@@ -73,6 +73,9 @@ dependencies {
     // MediaPipe
     implementation(libs.mediapipe.tasks.vision)
 
+    // ML Kit
+    implementation(libs.mlkit.segmentation.selfie)
+
     // TensorFlow Lite
     implementation(libs.tensorflow.lite)
     implementation(libs.tensorflow.lite.gpu)

@@ -24,11 +24,4 @@
     <string name="image_view_item_transform_content_description">Represents an image view in the
         item
     </string>
-
-    <string name="tab_face">Face</string>
-    <string name="tab_body">Body</string>
-    <string name="settings_body_model">Body Segmentation Model</string>
-    <string name="settings_body_delegate">Segmentation Delegate</string>
-    <string name="settings_body_gradient_start_color">Gradient Start Color</string>
-    <string name="settings_body_gradient_end_color">Gradient End Color</string>
 </resources>

@@ -32,7 +32,7 @@ class MainActivity : AppCompatActivity() {
         binding.navView?.let {
             appBarConfiguration = AppBarConfiguration(
                 setOf(
-                    R.id.nav_transform, R.id.nav_reflow, R.id.nav_slideshow, R.id.nav_voice, R.id.nav_settings
+                    R.id.nav_transform, R.id.nav_body_changer, R.id.nav_reflow, R.id.nav_slideshow, R.id.nav_voice, R.id.nav_settings
                 ),
                 binding.drawerLayout
             )
@@ -43,7 +43,7 @@ class MainActivity : AppCompatActivity() {
         binding.appBarMain.contentMain.bottomNavView?.let {
             appBarConfiguration = AppBarConfiguration(
                 setOf(
-                    R.id.nav_transform, R.id.nav_reflow, R.id.nav_slideshow
+                    R.id.nav_transform, R.id.nav_body_changer, R.id.nav_reflow, R.id.nav_slideshow
                 )
             )
             setupActionBarWithNavController(navController, appBarConfiguration)
