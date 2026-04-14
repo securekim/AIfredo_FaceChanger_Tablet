@@ -30,6 +30,8 @@ import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.GpuDelegate
 import java.io.FileInputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import java.nio.channels.FileChannel
 import java.util.concurrent.ExecutorService
@@ -89,7 +91,6 @@ class BodyChangerFragment : Fragment() {
     }
 
     private fun setupSegmenter() {
-        // Clear previous
         imageSegmenter?.close(); imageSegmenter = null
         mlKitSegmenter?.close(); mlKitSegmenter = null
         yoloInterpreter?.close(); yoloInterpreter = null
@@ -99,7 +100,8 @@ class BodyChangerFragment : Fragment() {
             "MediaPipe" -> {
                 try {
                     val baseOptionsBuilder = BaseOptions.builder()
-                        .setModelAssetPath("selfie_segmenter.task")
+                        // assets에 있는 실제 파일명으로 수정
+                        .setModelAssetPath("mediapipe-meet-segmentation_model_float16_quant.tflite")
                     
                     if (bodyDelegate == "GPU") {
                         baseOptionsBuilder.setDelegate(Delegate.GPU)
@@ -113,18 +115,17 @@ class BodyChangerFragment : Fragment() {
                         .setResultListener { result, image ->
                             val masks = result.confidenceMasks()
                             if (masks.isPresent && masks.get().isNotEmpty()) {
+                                // MediaPipe의 마스크를 비트맵으로 추출
                                 val mask = BitmapExtractor.extract(masks.get()[0])
-                                val original = BitmapExtractor.extract(image)
-                                activity?.runOnUiThread {
-                                    binding.bodyOverlay.updateData(mask, original, startColor, endColor)
-                                }
+                                binding.bodyOverlay.updateData(mask, null, startColor, endColor)
                             }
                         }
                         .build()
                     
                     imageSegmenter = ImageSegmenter.createFromOptions(requireContext(), options)
+                    Log.d("BodyChanger", "MediaPipe Segmenter initialized")
                 } catch (e: Exception) {
-                    Log.e("BodyChanger", "MediaPipe init error", e)
+                    Log.e("BodyChanger", "MediaPipe init error: ${e.message}", e)
                 }
             }
             "ML Kit" -> {
@@ -186,11 +187,18 @@ class BodyChangerFragment : Fragment() {
                                         ?.addOnSuccessListener { result ->
                                             val maskBuffer = result.buffer
                                             maskBuffer.rewind()
+                                            
+                                            // ML Kit은 Float mask를 제공하므로 변환 필요
                                             val maskBitmap = Bitmap.createBitmap(result.width, result.height, Bitmap.Config.ALPHA_8)
-                                            maskBitmap.copyPixelsFromBuffer(maskBuffer)
-                                            activity?.runOnUiThread {
-                                                binding.bodyOverlay.updateData(maskBitmap, bitmap, startColor, endColor)
+                                            val byteBuffer = ByteBuffer.allocateDirect(result.width * result.height)
+                                            while (maskBuffer.hasRemaining()) {
+                                                val confidence = maskBuffer.float
+                                                byteBuffer.put((confidence * 255).toInt().toByte())
                                             }
+                                            byteBuffer.rewind()
+                                            maskBitmap.copyPixelsFromBuffer(byteBuffer)
+                                            
+                                            binding.bodyOverlay.updateData(maskBitmap, bitmap, startColor, endColor)
                                         }
                                 }
                                 "YOLO" -> {
@@ -205,19 +213,21 @@ class BodyChangerFragment : Fragment() {
             try {
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(viewLifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, preview, imageAnalyzer)
-            } catch (e: Exception) {}
+            } catch (e: Exception) {
+                Log.e("BodyChanger", "Camera binding failed", e)
+            }
         }, ContextCompat.getMainExecutor(requireContext()))
     }
 
     private fun processYolo(bitmap: Bitmap) {
         val interpreter = yoloInterpreter ?: return
         
-        val inputShape = interpreter.getInputTensor(0).shape() // [1, H, W, 3]
+        val inputShape = interpreter.getInputTensor(0).shape()
         val inputH = inputShape[1]
         val inputW = inputShape[2]
         
         val scaledBitmap = Bitmap.createScaledBitmap(bitmap, inputW, inputH, true)
-        val inputBuffer = java.nio.ByteBuffer.allocateDirect(1 * inputH * inputW * 3 * 4).order(java.nio.ByteOrder.nativeOrder())
+        val inputBuffer = ByteBuffer.allocateDirect(1 * inputH * inputW * 3 * 4).order(ByteOrder.nativeOrder())
         
         val intValues = IntArray(inputW * inputH)
         scaledBitmap.getPixels(intValues, 0, inputW, 0, 0, inputW, inputH)
@@ -227,10 +237,10 @@ class BodyChangerFragment : Fragment() {
             inputBuffer.putFloat((pixelValue and 0xFF) / 255.0f)
         }
         
-        val outputShape = interpreter.getOutputTensor(0).shape() // Usually [1, H, W, 1] for segmentation
+        val outputShape = interpreter.getOutputTensor(0).shape()
         val outH = outputShape[1]
         val outW = outputShape[2]
-        val outputBuffer = java.nio.ByteBuffer.allocateDirect(1 * outH * outW * 1 * 4).order(java.nio.ByteOrder.nativeOrder())
+        val outputBuffer = ByteBuffer.allocateDirect(1 * outH * outW * 1 * 4).order(ByteOrder.nativeOrder())
         
         interpreter.run(inputBuffer, outputBuffer)
         outputBuffer.rewind()
@@ -241,7 +251,7 @@ class BodyChangerFragment : Fragment() {
             val confidence = outputBuffer.float
             maskPixels[i] = if (confidence > 0.5f) 255.toByte() else 0.toByte()
         }
-        maskBitmap.copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(maskPixels))
+        maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(maskPixels))
         
         activity?.runOnUiThread {
             binding.bodyOverlay.updateData(maskBitmap, bitmap, startColor, endColor)

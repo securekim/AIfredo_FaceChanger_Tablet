@@ -31,6 +31,11 @@ class SettingsFragment : Fragment() {
         
         setupTabLayout()
         
+        // Restore last selected tab
+        val lastTab = sharedPref.getInt("last_settings_tab", 0)
+        binding.tabLayout.getTabAt(lastTab)?.select()
+        updateTabVisibility(lastTab)
+
         // --- Face Settings ---
         val currentModel = sharedPref.getString("selected_model", "AnimeGAN_Hayao")
         when (currentModel) {
@@ -117,27 +122,32 @@ class SettingsFragment : Fragment() {
 
         binding.editBodyStartColor.setText(sharedPref.getString("body_start_color", "#FF0000"))
         binding.editBodyEndColor.setText(sharedPref.getString("body_end_color", "#0000FF"))
-        
-        // Simple save on focus loss or similar could be added, but for now let's just use the current values in Fragment
     }
 
     private fun setupTabLayout() {
         binding.tabLayout.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
             override fun onTabSelected(tab: TabLayout.Tab?) {
-                when (tab?.position) {
-                    0 -> {
-                        binding.layoutFaceSettings.visibility = View.VISIBLE
-                        binding.layoutBodySettings.visibility = View.GONE
-                    }
-                    1 -> {
-                        binding.layoutFaceSettings.visibility = View.GONE
-                        binding.layoutBodySettings.visibility = View.VISIBLE
-                    }
-                }
+                val position = tab?.position ?: 0
+                updateTabVisibility(position)
+                activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE)
+                    ?.edit()?.putInt("last_settings_tab", position)?.apply()
             }
             override fun onTabUnselected(tab: TabLayout.Tab?) {}
             override fun onTabReselected(tab: TabLayout.Tab?) {}
         })
+    }
+
+    private fun updateTabVisibility(position: Int) {
+        when (position) {
+            0 -> {
+                binding.layoutFaceSettings.visibility = View.VISIBLE
+                binding.layoutBodySettings.visibility = View.GONE
+            }
+            1 -> {
+                binding.layoutFaceSettings.visibility = View.GONE
+                binding.layoutBodySettings.visibility = View.VISIBLE
+            }
+        }
     }
 
     override fun onPause() {

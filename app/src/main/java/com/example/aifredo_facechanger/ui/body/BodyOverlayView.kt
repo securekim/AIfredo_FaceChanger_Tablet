@@ -18,6 +18,7 @@ class BodyOverlayView @JvmOverloads constructor(
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        // Keeps the destination (gradient) where the source (mask) is present
         xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
     }
     private val gradientPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -27,43 +28,34 @@ class BodyOverlayView @JvmOverloads constructor(
         originalBitmap = original
         startColor = startCol
         endColor = endCol
-        invalidate()
+        postInvalidate()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val original = originalBitmap ?: return
         val mask = maskBitmap ?: return
 
         val viewWidth = width.toFloat()
         val viewHeight = height.toFloat()
-
-        // Draw original frame first
         val destRect = RectF(0f, 0f, viewWidth, viewHeight)
-        canvas.drawBitmap(original, null, destRect, paint)
 
-        // Create a layer for the right side effect
+        // We don't draw the original bitmap here because PreviewView is already showing it.
+        // This view acts as a transparent overlay that only draws the segmented effect.
+
+        // Save layer for masking
         val saveCount = canvas.saveLayer(0f, 0f, viewWidth, viewHeight, null)
 
-        // Restrict to right half for the effect
-        canvas.clipRect(viewWidth / 2f, 0f, viewWidth, viewHeight)
-
-        // Draw Gradient
+        // Draw Gradient over the entire view
         gradientPaint.shader = LinearGradient(
-            viewWidth / 2f, 0f, viewWidth, viewHeight,
+            0f, 0f, 0f, viewHeight,
             startColor, endColor, Shader.TileMode.CLAMP
         )
-        canvas.drawRect(viewWidth / 2f, 0f, viewWidth, viewHeight, gradientPaint)
+        canvas.drawRect(destRect, gradientPaint)
 
         // Apply Mask (Segmentation Result)
-        // The mask should be scaled to match the view
+        // The mask defines where the gradient should be visible (the person)
         canvas.drawBitmap(mask, null, destRect, maskPaint)
 
         canvas.restoreToCount(saveCount)
-        
-        // Draw divider
-        paint.color = Color.WHITE
-        paint.strokeWidth = 5f
-        canvas.drawLine(viewWidth / 2f, 0f, viewWidth / 2f, viewHeight, paint)
     }
 }

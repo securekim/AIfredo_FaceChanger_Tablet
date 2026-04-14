@@ -1,5 +1,6 @@
 package com.example.aifredo_facechanger
 
+import android.content.Context
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
@@ -48,6 +49,21 @@ class MainActivity : AppCompatActivity() {
             )
             setupActionBarWithNavController(navController, appBarConfiguration)
             it.setupWithNavController(navController)
+        }
+
+        // Restore last menu
+        val sharedPref = getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE)
+        val lastNavId = sharedPref.getInt("last_nav_id", R.id.nav_transform)
+        
+        // Use post to ensure navigation happens after setup
+        binding.root.post {
+            if (navController.currentDestination?.id != lastNavId) {
+                navController.navigate(lastNavId)
+            }
+        }
+
+        navController.addOnDestinationChangedListener { _, destination, _ ->
+            sharedPref.edit().putInt("last_nav_id", destination.id).apply()
         }
     }
 
