@@ -218,7 +218,7 @@ class TransformFragment : Fragment() {
                             lastValidFaceResult = result
                             faceLossCounter = 0
 
-                            // [요청 1] 최근 20프레임 동안 한 번도 안 끊기고 계속 잡혔을 때만 스타일 적용 (깜빡임 방지)
+                            // 최근 20프레임 동안 한 번도 안 끊기고 계속 잡혔을 때만 스타일 적용 (깜빡임 방지)
                             if (faceStableCounter >= 20) {
                                 targetTransitionRatio = 1f
                             }
@@ -396,14 +396,22 @@ class TransformFragment : Fragment() {
             val earL = landmarks[7]
             val earR = landmarks[8]
 
-            // [요청 2] 측면에서도 비교적 일정하게 유지되는 코(0번)와 귀(7, 8번) 사이의 거리를 사용해 크기 산출
+            // 측면에서도 비교적 일정하게 유지되는 코(0번)와 귀(7, 8번) 사이의 거리를 사용해 크기 산출
             val dL = sqrt(((nose.x() - earL.x()) * imgW).pow(2) + ((nose.y() - earL.y()) * imgH).pow(2))
             val dR = sqrt(((nose.x() - earR.x()) * imgW).pow(2) + ((nose.y() - earR.y()) * imgH).pow(2))
+            
+            // 코와 양쪽 귀 사이의 거리 중 최대값을 기준으로 삼아 측면 회전 시에도 일정한 스케일을 유지
             val refDist = max(dL, dR)
 
+            // 카메라와 얼굴이 가까울 때(refDist가 클 때) 광각 렌즈 왜곡 등으로 인해 바운딩 박스가 작아지는 현상을 보정
+            // 화면에서 얼굴이 차지하는 비율(closeness)에 따라 배율을 동적으로 증가시킴
+            val closeness = (refDist / imgW).coerceIn(0f, 1f)
+            val adaptiveMultiplier = 2.2f + (closeness * 1.0f) // 가까울수록 2.2 -> 3.2까지 증가
+
             pCx = nose.x() * imgW
-            pCy = (nose.y() * imgH) - (refDist * 0.15f) // 코에서 위쪽으로 보정 (머리 위쪽 공간 확보)
-            pSize = refDist * 2.2f // 얼굴 기준 크기
+            // 코에서 위쪽으로 보정하여 머리 윗부분(정수리) 공간을 확보. 보정치도 refDist에 비례하여 조정.
+            pCy = (nose.y() * imgH) - (refDist * 0.35f) 
+            pSize = refDist * adaptiveMultiplier
         }
 
         val faceDetected = faceRes?.faceLandmarks()?.isNotEmpty() == true
@@ -450,7 +458,7 @@ class TransformFragment : Fragment() {
                 if (eyeDist < faceW * 0.15f) faceValidThisFrame = false
             }
 
-            // [요청 1] 20프레임 이상 연속 감지 확인
+            // 20프레임 이상 연속 감지 확인
             if (faceValidThisFrame) {
                 faceStableCounter++
             } else {
