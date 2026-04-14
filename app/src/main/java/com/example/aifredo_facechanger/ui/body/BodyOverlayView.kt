@@ -37,25 +37,37 @@ class BodyOverlayView @JvmOverloads constructor(
 
         val viewWidth = width.toFloat()
         val viewHeight = height.toFloat()
-        val destRect = RectF(0f, 0f, viewWidth, viewHeight)
+        
+        // Right side only: from width/2 to width
+        val halfWidth = viewWidth / 2f
+        val destRect = RectF(halfWidth, 0f, viewWidth, viewHeight)
+        
+        // We only want to draw the mask/gradient on the right side.
+        // We need to clip the canvas to the right half.
+        canvas.save()
+        canvas.clipRect(halfWidth, 0f, viewWidth, viewHeight)
 
-        // We don't draw the original bitmap here because PreviewView is already showing it.
-        // This view acts as a transparent overlay that only draws the segmented effect.
+        // Save layer for masking within the clipped area
+        val saveCount = canvas.saveLayer(halfWidth, 0f, viewWidth, viewHeight, null)
 
-        // Save layer for masking
-        val saveCount = canvas.saveLayer(0f, 0f, viewWidth, viewHeight, null)
-
-        // Draw Gradient over the entire view
+        // Draw Gradient over the entire view (it will be clipped)
         gradientPaint.shader = LinearGradient(
-            0f, 0f, 0f, viewHeight,
+            halfWidth, 0f, halfWidth, viewHeight,
             startColor, endColor, Shader.TileMode.CLAMP
         )
         canvas.drawRect(destRect, gradientPaint)
 
         // Apply Mask (Segmentation Result)
         // The mask defines where the gradient should be visible (the person)
-        canvas.drawBitmap(mask, null, destRect, maskPaint)
+        // We use destRect so it stretches to cover the right half. 
+        // Note: The mask itself represents the full person, so stretching it to half might look weird if not handled.
+        // Usually, the mask matches the aspect ratio of the camera.
+        // If the camera is full screen, the mask is full screen. 
+        // We should draw the FULL mask but it will be clipped to the right half.
+        val fullRect = RectF(0f, 0f, viewWidth, viewHeight)
+        canvas.drawBitmap(mask, null, fullRect, maskPaint)
 
         canvas.restoreToCount(saveCount)
+        canvas.restore()
     }
 }
