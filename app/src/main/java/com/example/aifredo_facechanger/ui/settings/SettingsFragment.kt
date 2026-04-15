@@ -100,6 +100,7 @@ class SettingsFragment : Fragment() {
             "MediaPipe" -> binding.radioBodyMediapipe.isChecked = true
             "ML Kit" -> binding.radioBodyMlkit.isChecked = true
             "YOLO" -> binding.radioBodyYolo.isChecked = true
+            "YOLACT" -> binding.radioBodyYolact.isChecked = true
             else -> binding.radioBodyMediapipe.isChecked = true
         }
 
@@ -108,15 +109,24 @@ class SettingsFragment : Fragment() {
                 R.id.radio_body_mediapipe -> "MediaPipe"
                 R.id.radio_body_mlkit -> "ML Kit"
                 R.id.radio_body_yolo -> "YOLO"
+                R.id.radio_body_yolact -> "YOLACT"
                 else -> "MediaPipe"
             }
             sharedPref.edit().putString("body_model", selected).apply()
         }
 
         val bodyDelegate = sharedPref.getString("body_delegate", "CPU")
-        if (bodyDelegate == "GPU") binding.radioBodyGpu.isChecked = true else binding.radioBodyCpu.isChecked = true
+        when (bodyDelegate) {
+            "GPU" -> binding.radioBodyGpu.isChecked = true
+            "NNAPI" -> binding.radioBodyNnapi.isChecked = true
+            else -> binding.radioBodyCpu.isChecked = true
+        }
         binding.radioGroupBodyDelegate.setOnCheckedChangeListener { _, checkedId ->
-            val selected = if (checkedId == R.id.radio_body_gpu) "GPU" else "CPU"
+            val selected = when (checkedId) {
+                R.id.radio_body_gpu -> "GPU"
+                R.id.radio_body_nnapi -> "NNAPI"
+                else -> "CPU"
+            }
             sharedPref.edit().putString("body_delegate", selected).apply()
         }
 
