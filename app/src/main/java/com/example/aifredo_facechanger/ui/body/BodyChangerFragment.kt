@@ -3,7 +3,6 @@ package com.example.aifredo_facechanger.ui.body
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.content.res.AssetManager
 import android.graphics.*
 import android.os.Bundle
 import android.util.Log
@@ -17,23 +16,11 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import com.example.aifredo_facechanger.databinding.FragmentBodyChangerBinding
-import com.google.mediapipe.framework.image.BitmapExtractor
-import com.google.mediapipe.tasks.core.BaseOptions
-import com.google.mediapipe.tasks.core.Delegate
-import com.google.mediapipe.tasks.vision.core.RunningMode
-import com.google.mediapipe.tasks.vision.imagesegmenter.ImageSegmenter
-import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.Segmenter
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
-import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.gpu.GpuDelegate
-import java.io.FileInputStream
 import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.MappedByteBuffer
-import java.nio.channels.FileChannel
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ExecutorService
@@ -45,20 +32,21 @@ class BodyChangerFragment : Fragment() {
     private val binding get() = _binding!!
 
     private var cameraExecutor: ExecutorService? = null
-    private var segmenterExecutor: ExecutorService? = null
-    
-    private var imageSegmenter: ImageSegmenter? = null
+
     private var mlKitSegmenter: Segmenter? = null
-    private var yoloInterpreter: Interpreter? = null
-    private var gpuDelegate: GpuDelegate? = null
-    
-    private var bodyModel: String = "MediaPipe"
-    private var bodyDelegate: String = "CPU"
+
+    private val segmenterLock = Any()
+
     private var startColor: Int = Color.RED
     private var endColor: Int = Color.BLUE
-    
+
     private val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     private val TAG = "BodyChanger"
+
+    companion object {
+        private val sharedSegmenterExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+        @Volatile private var isInitializing = false
+    }
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -72,10 +60,6 @@ class BodyChangerFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         cameraExecutor = Executors.newSingleThreadExecutor()
-        segmenterExecutor = Executors.newSingleThreadExecutor()
-        
-        loadSettings()
-        setupSegmenter()
 
         if (allPermissionsGranted()) startCamera()
         else requestPermissionLauncher.launch(arrayOf(Manifest.permission.CAMERA))
@@ -83,19 +67,16 @@ class BodyChangerFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        // onResume에서 설정을 다시 로드하고 세그멘터를 재설정하여 변경사항을 즉시 반영합니다.
         loadSettings()
         setupSegmenter()
     }
 
     private fun loadSettings() {
         val sharedPref = activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE) ?: return
-        bodyModel = sharedPref.getString("body_model", "MediaPipe") ?: "MediaPipe"
-        bodyDelegate = sharedPref.getString("body_delegate", "CPU") ?: "CPU"
         
         val startColorStr = sharedPref.getString("body_start_color", "#FF0000") ?: "#FF0000"
         val endColorStr = sharedPref.getString("body_end_color", "#0000FF") ?: "#0000FF"
-        
+
         try {
             startColor = Color.parseColor(startColorStr)
             endColor = Color.parseColor(endColorStr)
@@ -103,90 +84,44 @@ class BodyChangerFragment : Fragment() {
             startColor = Color.RED
             endColor = Color.BLUE
         }
-        Log.d(TAG, "Settings loaded: model=$bodyModel, delegate=$bodyDelegate")
     }
 
     private fun setupSegmenter() {
-        // 기존 리소스 해제
-        imageSegmenter?.close(); imageSegmenter = null
-        mlKitSegmenter?.close(); mlKitSegmenter = null
-        yoloInterpreter?.close(); yoloInterpreter = null
-        gpuDelegate?.close(); gpuDelegate = null
+        if (isInitializing) return
+        if (mlKitSegmenter != null) return
 
-        // UI 로그에 현재 선택된 모델 정보를 명확히 출력
-        addLog("Initializing Segmenter: Current selection is [$bodyModel] ($bodyDelegate)")
-
-        when (bodyModel) {
-            "MediaPipe" -> {
-                try {
-                    val baseOptionsBuilder = BaseOptions.builder()
-                        .setModelAssetPath("mediapipe-meet-segmentation_model_float16_quant.tflite")
-                    
-                    if (bodyDelegate == "GPU") {
-                        baseOptionsBuilder.setDelegate(Delegate.GPU)
-                    } else {
-                        baseOptionsBuilder.setDelegate(Delegate.CPU)
+        isInitializing = true
+        sharedSegmenterExecutor.execute {
+            try {
+                synchronized(segmenterLock) {
+                    try {
+                        mlKitSegmenter?.close()
+                        mlKitSegmenter = null
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error closing existing segmenter", e)
                     }
 
-                    val options = ImageSegmenter.ImageSegmenterOptions.builder()
-                        .setBaseOptions(baseOptionsBuilder.build())
-                        .setRunningMode(RunningMode.LIVE_STREAM)
-                        .setResultListener { result, image ->
-                            val masks = result.confidenceMasks()
-                            if (masks.isPresent && masks.get().isNotEmpty()) {
-                                val mask = BitmapExtractor.extract(masks.get()[0])
-                                activity?.runOnUiThread {
-                                    binding.bodyOverlay.updateData(mask, null, startColor, endColor)
-                                }
-                            }
-                        }
-                        .build()
-                    
-                    imageSegmenter = ImageSegmenter.createFromOptions(requireContext(), options)
-                    addLog(">> MediaPipe Segmenter Ready")
-                } catch (e: Exception) {
-                    addLog("MediaPipe Error: ${e.message}")
-                    Log.e(TAG, "MediaPipe init error", e)
-                }
-            }
-            "ML Kit" -> {
-                try {
-                    val options = SelfieSegmenterOptions.Builder()
-                        .setDetectorMode(SelfieSegmenterOptions.STREAM_MODE)
-                        .build()
-                    mlKitSegmenter = Segmentation.getClient(options)
-                    addLog(">> ML Kit Segmenter Ready")
-                } catch (e: Exception) {
-                    addLog("ML Kit Error: ${e.message}")
-                }
-            }
-            "YOLO" -> {
-                try {
-                    val options = Interpreter.Options()
-                    if (bodyDelegate == "GPU") {
-                        gpuDelegate = GpuDelegate()
-                        options.addDelegate(gpuDelegate)
-                    } else {
-                        options.setNumThreads(4)
-                    }
-                    val modelBuffer = loadModelFile(requireContext().assets, "AIfredo_epoch150_Loss28.task")
-                    yoloInterpreter = Interpreter(modelBuffer, options)
-                    addLog(">> YOLO Segmenter Ready")
-                } catch (e: Exception) {
-                    addLog("YOLO Error: ${e.message}")
-                    Log.e(TAG, "YOLO init error", e)
-                }
-            }
-            else -> {
-                addLog("Warning: Unknown model [$bodyModel], defaulting to MediaPipe")
-            }
-        }
-    }
+                    // 네이티브 메모리 안정화 대기
+                    System.gc()
+                    try { Thread.sleep(500) } catch (e: Exception) {}
 
-    private fun loadModelFile(assets: AssetManager, path: String): MappedByteBuffer {
-        assets.openFd(path).use { fd ->
-            FileInputStream(fd.fileDescriptor).use { inputStream ->
-                return inputStream.channel.map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
+                    if (!isAdded) return@synchronized
+
+                    addLog("Initializing ML Kit")
+
+                    try {
+                        val options = SelfieSegmenterOptions.Builder()
+                            .setDetectorMode(SelfieSegmenterOptions.STREAM_MODE)
+                            .build()
+                        val newSegmenter = Segmentation.getClient(options)
+                        mlKitSegmenter = newSegmenter
+                        addLog(">> ML Kit Ready")
+                    } catch (e: Exception) {
+                        addLog("ML Kit Error: ${e.message}")
+                    }
+                }
+            } finally {
+                isInitializing = false
             }
         }
     }
@@ -195,11 +130,8 @@ class BodyChangerFragment : Fragment() {
         val context = context ?: return
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         cameraProviderFuture.addListener({
-            val cameraProvider = try { cameraProviderFuture.get() } catch (e: Exception) { 
-                addLog("Camera Provider Error: ${e.message}")
-                return@addListener 
-            }
-            
+            val cameraProvider = try { cameraProviderFuture.get() } catch (e: Exception) { return@addListener }
+
             val preview = Preview.Builder().build().also {
                 it.setSurfaceProvider(binding.viewFinder.surfaceProvider)
             }
@@ -218,9 +150,7 @@ class BodyChangerFragment : Fragment() {
             try {
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(viewLifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, preview, imageAnalyzer)
-                addLog("Camera Started")
             } catch (e: Exception) {
-                addLog("Camera Binding Error: ${e.message}")
                 Log.e(TAG, "Camera binding failed", e)
             }
         }, ContextCompat.getMainExecutor(context))
@@ -233,88 +163,32 @@ class BodyChangerFragment : Fragment() {
             return
         }
 
-        // 현재 설정된 bodyModel에 따라 실제 엔진이 구동됩니다.
-        when (bodyModel) {
-            "MediaPipe" -> {
-                val mpImage = BitmapImageBuilder(bitmap).build()
-                imageSegmenter?.segmentAsync(mpImage, System.currentTimeMillis())
-            }
-            "ML Kit" -> {
+        synchronized(segmenterLock) {
+            val segmenter = mlKitSegmenter
+            if (segmenter != null) {
                 val inputImage = InputImage.fromBitmap(bitmap, 0)
-                mlKitSegmenter?.process(inputImage)
-                    ?.addOnSuccessListener { result ->
+                segmenter.process(inputImage)
+                    .addOnSuccessListener { result ->
                         val maskBuffer = result.buffer
                         maskBuffer.rewind()
-                        
                         val maskBitmap = Bitmap.createBitmap(result.width, result.height, Bitmap.Config.ALPHA_8)
                         val byteBuffer = ByteBuffer.allocateDirect(result.width * result.height)
                         while (maskBuffer.hasRemaining()) {
-                            val confidence = maskBuffer.float
-                            byteBuffer.put((confidence * 255).toInt().toByte())
+                            byteBuffer.put((maskBuffer.float * 255).toInt().toByte())
                         }
                         byteBuffer.rewind()
                         maskBitmap.copyPixelsFromBuffer(byteBuffer)
-                        
-                        binding.bodyOverlay.updateData(maskBitmap, bitmap, startColor, endColor)
+                        _binding?.bodyOverlay?.updateData(maskBitmap, bitmap, startColor, endColor)
                     }
-            }
-            "YOLO" -> {
-                segmenterExecutor?.execute {
-                    processYolo(bitmap)
-                }
             }
         }
         imageProxy.close()
-    }
-
-    private fun processYolo(bitmap: Bitmap) {
-        val interpreter = yoloInterpreter ?: return
-        
-        try {
-            val inputShape = interpreter.getInputTensor(0).shape()
-            val inputH = inputShape[1]
-            val inputW = inputShape[2]
-            
-            val scaledBitmap = Bitmap.createScaledBitmap(bitmap, inputW, inputH, true)
-            val inputBuffer = ByteBuffer.allocateDirect(1 * inputH * inputW * 3 * 4).order(ByteOrder.nativeOrder())
-            
-            val intValues = IntArray(inputW * inputH)
-            scaledBitmap.getPixels(intValues, 0, inputW, 0, 0, inputW, inputH)
-            for (pixelValue in intValues) {
-                inputBuffer.putFloat(((pixelValue shr 16) and 0xFF) / 255.0f)
-                inputBuffer.putFloat(((pixelValue shr 8) and 0xFF) / 255.0f)
-                inputBuffer.putFloat((pixelValue and 0xFF) / 255.0f)
-            }
-            
-            val outputShape = interpreter.getOutputTensor(0).shape()
-            val outH = outputShape[1]
-            val outW = outputShape[2]
-            val outputBuffer = ByteBuffer.allocateDirect(1 * outH * outW * 1 * 4).order(ByteOrder.nativeOrder())
-            
-            interpreter.run(inputBuffer, outputBuffer)
-            outputBuffer.rewind()
-            
-            val maskBitmap = Bitmap.createBitmap(outW, outH, Bitmap.Config.ALPHA_8)
-            val maskPixels = ByteArray(outW * outH)
-            for (i in 0 until outW * outH) {
-                val confidence = outputBuffer.float
-                maskPixels[i] = if (confidence > 0.5f) 255.toByte() else 0.toByte()
-            }
-            maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(maskPixels))
-            
-            activity?.runOnUiThread {
-                binding.bodyOverlay.updateData(maskBitmap, bitmap, startColor, endColor)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "YOLO process error", e)
-        }
     }
 
     private fun processImageProxy(imageProxy: ImageProxy): Bitmap? {
         return try {
             val bitmap = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
             bitmap.copyPixelsFromBuffer(imageProxy.planes[0].buffer)
-            
             val matrix = Matrix().apply {
                 postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
                 postScale(-1f, 1f)
@@ -330,22 +204,30 @@ class BodyChangerFragment : Fragment() {
             _binding?.let { b ->
                 val timestamp = sdf.format(Date())
                 val currentLog = b.eventLog.text.toString()
-                // 새 로그를 상단에 추가하여 즉시 확인 가능하도록 함
-                b.eventLog.text = "[$timestamp] $message\n${currentLog.take(1000)}"
+                b.eventLog.text = "[$timestamp] $message\n${currentLog.take(500)}"
             }
         }
     }
 
     private fun allPermissionsGranted() = ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
+    override fun onPause() {
+        super.onPause()
+        sharedSegmenterExecutor.execute {
+            synchronized(segmenterLock) {
+                try {
+                    mlKitSegmenter?.close()
+                    mlKitSegmenter = null
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error closing on pause", e)
+                }
+            }
+        }
+    }
+
     override fun onDestroyView() {
         super.onDestroyView()
         cameraExecutor?.shutdown()
-        segmenterExecutor?.shutdown()
-        imageSegmenter?.close()
-        mlKitSegmenter?.close()
-        yoloInterpreter?.close()
-        gpuDelegate?.close()
         _binding = null
     }
 }
