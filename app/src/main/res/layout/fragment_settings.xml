@@ -230,6 +230,12 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="YOLACT (ResNet-50)" />
+
+                    <RadioButton
+                        android:id="@+id/radio_body_modnet"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="MODNet" />
                 </RadioGroup>
 
                 <TextView
