@@ -31,6 +31,11 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import org.tensorflow.lite.support.image.ImageProcessor
+import org.tensorflow.lite.support.image.TensorImage
+import org.tensorflow.lite.support.image.ops.ResizeOp
+import org.tensorflow.lite.support.common.ops.NormalizeOp
+import org.tensorflow.lite.DataType
 
 class BodyChangerFragment : Fragment() {
 
@@ -44,16 +49,18 @@ class BodyChangerFragment : Fragment() {
     private var gpuDelegate: GpuDelegate? = null
     private var nnApiDelegate: NnApiDelegate? = null
 
-    // YOLACT 사전 할당 버퍼
-    private var yolactInputBuffer: ByteBuffer? = null
+    // YOLACT 지원 객체 및 사전 할당 버퍼
+    private var yolactImageProcessor: ImageProcessor? = null
+    private var yolactTensorImage: TensorImage? = null
     private var yolactOutputBoxes: ByteBuffer? = null
     private var yolactOutputScores: ByteBuffer? = null
     private var yolactOutputCoeffs: ByteBuffer? = null
     private var yolactOutputProtos: ByteBuffer? = null
 
-    // 성능 최적화를 위한 전역 재사용 버퍼 (generateMask 용)
+    // 성능 최적화를 위한 전역 재사용 버퍼
     private var reusableMaskPixels: ByteBuffer? = null
     private var reusableProtosArray: FloatArray? = null
+    private var reusableScoresArray: FloatArray? = null
 
     private val segmenterLock = Any()
 
@@ -213,16 +220,23 @@ class BodyChangerFragment : Fragment() {
             val interpreter = Interpreter(modelBuffer, options)
             yolactInterpreter = interpreter
 
-            // 입력 및 출력 버퍼 할당
-            yolactInputBuffer = ByteBuffer.allocateDirect(1 * 550 * 550 * 3 * 4).apply { order(ByteOrder.nativeOrder()) }
+            // 1. ImageProcessor 및 TensorImage 초기화 (전처리 속도 향상)
+            yolactImageProcessor = ImageProcessor.Builder()
+                .add(ResizeOp(550, 550, ResizeOp.ResizeMethod.BILINEAR))
+                .add(NormalizeOp(floatArrayOf(123.675f, 116.28f, 103.53f), floatArrayOf(58.395f, 57.12f, 57.375f)))
+                .build()
+            yolactTensorImage = TensorImage(DataType.FLOAT32)
+
+            // 출력 버퍼 할당
             yolactOutputBoxes = ByteBuffer.allocateDirect(19248 * 4 * 4).apply { order(ByteOrder.nativeOrder()) }
             yolactOutputScores = ByteBuffer.allocateDirect(19248 * 81 * 4).apply { order(ByteOrder.nativeOrder()) }
             yolactOutputCoeffs = ByteBuffer.allocateDirect(19248 * 32 * 4).apply { order(ByteOrder.nativeOrder()) }
             yolactOutputProtos = ByteBuffer.allocateDirect(138 * 138 * 32 * 4).apply { order(ByteOrder.nativeOrder()) }
 
-            // 메모리 재할당 방지를 위한 마스크 연산용 버퍼 초기화
+            // 메모리 재할당 방지를 위한 전역 버퍼 초기화
             reusableMaskPixels = ByteBuffer.allocateDirect(138 * 138).apply { order(ByteOrder.nativeOrder()) }
             reusableProtosArray = FloatArray(138 * 138 * 32)
+            reusableScoresArray = FloatArray(19248 * 81)
 
             addLog(">> YOLACT Ready ($actualDelegate)")
         } catch (e: Exception) {
@@ -316,7 +330,6 @@ class BodyChangerFragment : Fragment() {
 
     private fun processYolact(bitmap: Bitmap) {
         val interpreter = yolactInterpreter ?: return
-        val inputBuffer = yolactInputBuffer ?: return
         val outBoxes = yolactOutputBoxes ?: return
         val outScores = yolactOutputScores ?: return
         val outCoeffs = yolactOutputCoeffs ?: return
@@ -324,22 +337,17 @@ class BodyChangerFragment : Fragment() {
 
         val startTime = System.currentTimeMillis()
 
-        val scaledBitmap = Bitmap.createScaledBitmap(bitmap, 550, 550, true)
-        inputBuffer.rewind()
+        // 1. ImageProcessor를 사용하여 전처리 최적화 (Bitmap -> InputBuffer)
+        val tImage = yolactTensorImage ?: return
+        tImage.load(bitmap)
+        val processedImage = yolactImageProcessor?.process(tImage) ?: return
+        val inputBuffer = processedImage.buffer
 
-        val intValues = IntArray(550 * 550)
-        scaledBitmap.getPixels(intValues, 0, 550, 0, 0, 550, 550)
-        for (pixelValue in intValues) {
-            inputBuffer.putFloat(((pixelValue shr 16 and 0xFF) - 123.675f) / 58.395f)
-            inputBuffer.putFloat(((pixelValue shr 8 and 0xFF) - 116.28f) / 57.12f)
-            inputBuffer.putFloat(((pixelValue and 0xFF) - 103.53f) / 57.375f)
-        }
-        inputBuffer.rewind()
-
-        outBoxes.rewind()
-        outScores.rewind()
-        outCoeffs.rewind()
-        outProtos.rewind()
+        // 버퍼 초기화 (clear()를 사용하여 position=0, limit=capacity 설정)
+        outBoxes.clear()
+        outScores.clear()
+        outCoeffs.clear()
+        outProtos.clear()
 
         val outputs = mutableMapOf<Int, Any>()
         for (i in 0 until interpreter.outputTensorCount) {
@@ -361,25 +369,22 @@ class BodyChangerFragment : Fragment() {
             return
         }
 
-        val inferenceTime = System.currentTimeMillis() - startTime
-
-        // 에러 방지용 리와인드
+        // 2. 19,248개 박스 처리 최적화 (Bulk copy to FloatArray 후 CPU 연산)
+        // runForMultipleInputsOutputs 이후 position이 limit으로 이동하므로 다시 rewind
         outScores.rewind()
-        outCoeffs.rewind()
-        outProtos.rewind()
-
         val scoresFloatBuffer = outScores.asFloatBuffer()
-        val coeffsFloatBuffer = outCoeffs.asFloatBuffer()
-
-        // 데이터가 없으면 즉시 종료 (IndexOutOfBoundsException 방지)
-        if (scoresFloatBuffer.limit() == 0) return
+        val numDetections = minOf(19248, scoresFloatBuffer.limit() / 81)
+        val scoresArray = reusableScoresArray ?: FloatArray(numDetections * 81)
+        
+        // JNI 호출 최소화를 위해 로컬 배열로 한 번에 복사
+        scoresFloatBuffer.get(scoresArray, 0, numDetections * 81)
 
         var bestIdx = -1
         var maxScore = 0f
 
-        val numDetections = minOf(19248, scoresFloatBuffer.limit() / 81)
+        // Kotlin 루프에서 ByteBuffer.get()을 반복 호출하는 대신 로컬 배열을 사용하여 검색 속도 극대화
         for (i in 0 until numDetections) {
-            val score = scoresFloatBuffer.get(i * 81 + 1)
+            val score = scoresArray[i * 81 + 1] // Index 1: Person class
             if (score > maxScore) {
                 maxScore = score
                 bestIdx = i
@@ -388,6 +393,9 @@ class BodyChangerFragment : Fragment() {
 
         if (bestIdx != -1 && maxScore > 0.15f) {
             val coeffs = FloatArray(32)
+            // position > limit 에러 방지를 위해 rewind 후 asFloatBuffer 호출
+            outCoeffs.rewind()
+            val coeffsFloatBuffer = outCoeffs.asFloatBuffer()
             coeffsFloatBuffer.position(bestIdx * 32)
             coeffsFloatBuffer.get(coeffs)
 
@@ -398,11 +406,13 @@ class BodyChangerFragment : Fragment() {
                 _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor)
             }
             if (Random().nextInt(100) < 5) {
-                addLog("YOLACT ($actualDelegate): Score=${String.format("%.2f", maxScore)}, Time=${inferenceTime}ms")
+                val totalTime = System.currentTimeMillis() - startTime
+                addLog("YOLACT ($actualDelegate): Score=${String.format("%.2f", maxScore)}, Time=${totalTime}ms")
             }
         } else {
             if (Random().nextInt(100) < 5) {
-                addLog("YOLACT ($actualDelegate): No person (${inferenceTime}ms)")
+                val totalTime = System.currentTimeMillis() - startTime
+                addLog("YOLACT ($actualDelegate): No person (${totalTime}ms)")
             }
         }
     }
@@ -415,10 +425,10 @@ class BodyChangerFragment : Fragment() {
         val pixels = reusableMaskPixels ?: return maskBitmap
         val protosArray = reusableProtosArray ?: return maskBitmap
 
+        // runForMultipleInputsOutputs 이후 position이 limit으로 이동하므로 다시 rewind
         protos.rewind()
         val protosFloatBuffer = protos.asFloatBuffer()
-
-        // 반복문 밖에서 통째로 복사하여 속도 극대화
+        // 벌크 복사로 속도 향상
         protosFloatBuffer.get(protosArray)
 
         pixels.rewind()
@@ -429,8 +439,8 @@ class BodyChangerFragment : Fragment() {
                 for (k in 0 until 32) {
                     sum += coeffs[k] * protosArray[offset + k]
                 }
-                val prob = 1.0f / (1.0f + Math.exp(-sum.toDouble())).toFloat()
-                val alpha = if (prob > 0.5f) 255 else 0
+                // 최적화: Sigmoid(sum) > 0.5 는 sum > 0 과 동일하므로 exp 연산을 제거하여 CPU 부하 감소
+                val alpha = if (sum > 0f) 255 else 0
                 pixels.put(alpha.toByte())
             }
         }
@@ -441,8 +451,10 @@ class BodyChangerFragment : Fragment() {
 
     private fun processImageProxy(imageProxy: ImageProxy): Bitmap? {
         return try {
+            val buffer = imageProxy.planes[0].buffer
+            buffer.rewind()
             val bitmap = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
-            bitmap.copyPixelsFromBuffer(imageProxy.planes[0].buffer)
+            bitmap.copyPixelsFromBuffer(buffer)
             val matrix = Matrix().apply {
                 postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
                 postScale(-1f, 1f)
