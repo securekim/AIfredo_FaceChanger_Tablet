@@ -21,6 +21,8 @@ import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.Segmenter
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.gpu.CompatibilityList
+import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.nnapi.NnApiDelegate
 import org.tensorflow.lite.support.common.FileUtil
 import java.nio.ByteBuffer
@@ -29,7 +31,6 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import kotlin.math.exp
 
 class BodyChangerFragment : Fragment() {
 
@@ -40,14 +41,19 @@ class BodyChangerFragment : Fragment() {
 
     private var mlKitSegmenter: Segmenter? = null
     @Volatile private var yolactInterpreter: Interpreter? = null
+    private var gpuDelegate: GpuDelegate? = null
     private var nnApiDelegate: NnApiDelegate? = null
 
-    // Pre-allocated buffers for YOLACT
+    // YOLACT 사전 할당 버퍼
     private var yolactInputBuffer: ByteBuffer? = null
     private var yolactOutputBoxes: ByteBuffer? = null
     private var yolactOutputScores: ByteBuffer? = null
     private var yolactOutputCoeffs: ByteBuffer? = null
     private var yolactOutputProtos: ByteBuffer? = null
+
+    // 성능 최적화를 위한 전역 재사용 버퍼 (generateMask 용)
+    private var reusableMaskPixels: ByteBuffer? = null
+    private var reusableProtosArray: FloatArray? = null
 
     private val segmenterLock = Any()
 
@@ -55,6 +61,7 @@ class BodyChangerFragment : Fragment() {
     private var endColor: Int = Color.BLUE
     private var selectedModel: String = "MediaPipe"
     private var selectedDelegate: String = "CPU"
+    private var actualDelegate: String = "CPU"
 
     private val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     private val TAG = "BodyChanger"
@@ -91,7 +98,7 @@ class BodyChangerFragment : Fragment() {
 
     private fun loadSettings() {
         val sharedPref = activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE) ?: return
-        
+
         selectedModel = sharedPref.getString("body_model", "MediaPipe") ?: "MediaPipe"
         selectedDelegate = sharedPref.getString("body_delegate", "CPU") ?: "CPU"
         val startColorStr = sharedPref.getString("body_start_color", "#FF0000") ?: "#FF0000"
@@ -109,14 +116,13 @@ class BodyChangerFragment : Fragment() {
 
     private fun setupSegmenter() {
         if (isInitializing) return
-        
+
         isInitializing = true
         sharedSegmenterExecutor.execute {
             try {
                 synchronized(segmenterLock) {
                     closeCurrentSegmenter()
 
-                    // 네이티브 메모리 안정화 대기
                     System.gc()
                     try { Thread.sleep(300) } catch (e: Exception) {}
 
@@ -140,6 +146,8 @@ class BodyChangerFragment : Fragment() {
             mlKitSegmenter = null
             yolactInterpreter?.close()
             yolactInterpreter = null
+            gpuDelegate?.close()
+            gpuDelegate = null
             nnApiDelegate?.close()
             nnApiDelegate = null
         } catch (e: Exception) {
@@ -149,6 +157,7 @@ class BodyChangerFragment : Fragment() {
 
     private fun initMlKit() {
         addLog("Initializing ML Kit")
+        actualDelegate = "N/A (ML Kit)"
         try {
             val options = SelfieSegmenterOptions.Builder()
                 .setDetectorMode(SelfieSegmenterOptions.STREAM_MODE)
@@ -161,46 +170,61 @@ class BodyChangerFragment : Fragment() {
     }
 
     private fun initYolact() {
-        addLog("Initializing YOLACT ($selectedDelegate)")
+        addLog("Initializing YOLACT with $selectedDelegate")
+        actualDelegate = "CPU"
         try {
             val options = Interpreter.Options()
-            if (selectedDelegate == "NNAPI") {
-                try {
-                    nnApiDelegate = NnApiDelegate()
-                    options.addDelegate(nnApiDelegate)
-                    addLog("NNAPI Delegate added successfully")
-                } catch (e: Exception) {
-                    addLog("NNAPI Error: ${e.message}. Using CPU.")
-                    Log.e(TAG, "NNAPI init failed", e)
+
+            when (selectedDelegate.uppercase()) {
+                "GPU" -> {
+                    try {
+                        val compatList = CompatibilityList()
+                        if (compatList.isDelegateSupportedOnThisDevice) {
+                            val gpuOptions = GpuDelegate.Options().apply {
+                                setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
+                            }
+                            gpuDelegate = GpuDelegate(gpuOptions)
+                            options.addDelegate(gpuDelegate)
+                            actualDelegate = "GPU"
+                            addLog("GPU Delegate applied")
+                        } else {
+                            addLog("GPU Delegate not supported. Using CPU.")
+                        }
+                    } catch (e: Exception) {
+                        addLog("GPU Error: ${e.message}")
+                    }
+                }
+                "NNAPI" -> {
+                    try {
+                        nnApiDelegate = NnApiDelegate()
+                        options.addDelegate(nnApiDelegate)
+                        actualDelegate = "NNAPI"
+                        addLog("NNAPI Delegate applied")
+                    } catch (e: Exception) {
+                        addLog("NNAPI Error: ${e.message}")
+                    }
+                }
+                else -> {
+                    addLog("Using CPU")
                 }
             }
-            
+
             val modelBuffer = FileUtil.loadMappedFile(requireContext(), YOLACT_MODEL_FILE)
             val interpreter = Interpreter(modelBuffer, options)
             yolactInterpreter = interpreter
-            
-            // Log output tensor shapes for debugging
-            for (i in 0 until interpreter.outputTensorCount) {
-                val tensor = interpreter.getOutputTensor(i)
-                Log.d(TAG, "Output Tensor $i: name=${tensor.name()}, shape=${tensor.shape().contentToString()}")
-            }
 
-            // Pre-allocate buffers for YOLACT 550x550
-            // Assuming default YOLACT ResNet-50 shapes:
-            // Boxes: [1, 19248, 4]
-            // Scores: [1, 19248, 81]
-            // Coeffs: [1, 19248, 32]
-            // Protos: [1, 138, 138, 32]
-            
-            yolactInputBuffer = ByteBuffer.allocateDirect(1 * 550 * 550 * 3 * 4).apply {
-                order(ByteOrder.nativeOrder())
-            }
+            // 입력 및 출력 버퍼 할당
+            yolactInputBuffer = ByteBuffer.allocateDirect(1 * 550 * 550 * 3 * 4).apply { order(ByteOrder.nativeOrder()) }
             yolactOutputBoxes = ByteBuffer.allocateDirect(19248 * 4 * 4).apply { order(ByteOrder.nativeOrder()) }
             yolactOutputScores = ByteBuffer.allocateDirect(19248 * 81 * 4).apply { order(ByteOrder.nativeOrder()) }
             yolactOutputCoeffs = ByteBuffer.allocateDirect(19248 * 32 * 4).apply { order(ByteOrder.nativeOrder()) }
             yolactOutputProtos = ByteBuffer.allocateDirect(138 * 138 * 32 * 4).apply { order(ByteOrder.nativeOrder()) }
-            
-            addLog(">> YOLACT Ready (Inputs/Outputs allocated)")
+
+            // 메모리 재할당 방지를 위한 마스크 연산용 버퍼 초기화
+            reusableMaskPixels = ByteBuffer.allocateDirect(138 * 138).apply { order(ByteOrder.nativeOrder()) }
+            reusableProtosArray = FloatArray(138 * 138 * 32)
+
+            addLog(">> YOLACT Ready ($actualDelegate)")
         } catch (e: Exception) {
             addLog("YOLACT Init Error: ${e.message}")
             Log.e(TAG, "YOLACT Init Error", e)
@@ -259,19 +283,34 @@ class BodyChangerFragment : Fragment() {
     }
 
     private fun processMlKit(bitmap: Bitmap) {
+        val startTime = System.currentTimeMillis()
         val inputImage = InputImage.fromBitmap(bitmap, 0)
         mlKitSegmenter?.process(inputImage)
             ?.addOnSuccessListener { result ->
+                val inferenceTime = System.currentTimeMillis() - startTime
                 val maskBuffer = result.buffer
                 maskBuffer.rewind()
-                val maskBitmap = Bitmap.createBitmap(result.width, result.height, Bitmap.Config.ALPHA_8)
-                val byteBuffer = ByteBuffer.allocateDirect(result.width * result.height)
-                while (maskBuffer.hasRemaining()) {
-                    byteBuffer.put((maskBuffer.float * 255).toInt().toByte())
+
+                val width = result.width
+                val height = result.height
+                val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
+                val pixels = ByteArray(width * height)
+
+                // Float 형식을 정확히 Byte 로 변환 처리
+                for (i in 0 until width * height) {
+                    val confidence = maskBuffer.float
+                    pixels[i] = (confidence * 255).toInt().toByte()
                 }
-                byteBuffer.rewind()
-                maskBitmap.copyPixelsFromBuffer(byteBuffer)
-                _binding?.bodyOverlay?.updateData(maskBitmap, bitmap, startColor, endColor)
+
+                maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
+
+                activity?.runOnUiThread {
+                    _binding?.bodyOverlay?.updateData(maskBitmap, bitmap, startColor, endColor)
+                }
+                
+                if (Random().nextInt(100) < 5) {
+                    addLog("ML Kit: Time=${inferenceTime}ms")
+                }
             }
     }
 
@@ -282,13 +321,12 @@ class BodyChangerFragment : Fragment() {
         val outScores = yolactOutputScores ?: return
         val outCoeffs = yolactOutputCoeffs ?: return
         val outProtos = yolactOutputProtos ?: return
-        
+
         val startTime = System.currentTimeMillis()
 
-        // 1. Preprocessing: 550x550 Resize & Normalization
         val scaledBitmap = Bitmap.createScaledBitmap(bitmap, 550, 550, true)
         inputBuffer.rewind()
-        
+
         val intValues = IntArray(550 * 550)
         scaledBitmap.getPixels(intValues, 0, 550, 0, 0, 550, 550)
         for (pixelValue in intValues) {
@@ -298,7 +336,6 @@ class BodyChangerFragment : Fragment() {
         }
         inputBuffer.rewind()
 
-        // 2. Prepare Outputs
         outBoxes.rewind()
         outScores.rewind()
         outCoeffs.rewind()
@@ -316,7 +353,6 @@ class BodyChangerFragment : Fragment() {
             }
         }
 
-        // 3. Inference
         try {
             interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
         } catch (e: Exception) {
@@ -327,20 +363,22 @@ class BodyChangerFragment : Fragment() {
 
         val inferenceTime = System.currentTimeMillis() - startTime
 
-        // 4. Post-processing
-        // Rewind ByteBuffers to read from the start via FloatBuffers
+        // 에러 방지용 리와인드
         outScores.rewind()
         outCoeffs.rewind()
         outProtos.rewind()
 
         val scoresFloatBuffer = outScores.asFloatBuffer()
         val coeffsFloatBuffer = outCoeffs.asFloatBuffer()
-        
+
+        // 데이터가 없으면 즉시 종료 (IndexOutOfBoundsException 방지)
+        if (scoresFloatBuffer.limit() == 0) return
+
         var bestIdx = -1
         var maxScore = 0f
-        
-        // Find best 'person' (class 1)
-        for (i in 0 until 19248) {
+
+        val numDetections = minOf(19248, scoresFloatBuffer.limit() / 81)
+        for (i in 0 until numDetections) {
             val score = scoresFloatBuffer.get(i * 81 + 1)
             if (score > maxScore) {
                 maxScore = score
@@ -352,19 +390,19 @@ class BodyChangerFragment : Fragment() {
             val coeffs = FloatArray(32)
             coeffsFloatBuffer.position(bestIdx * 32)
             coeffsFloatBuffer.get(coeffs)
-            
+
             val maskBitmap = generateMask(coeffs, outProtos)
             val finalMask = Bitmap.createScaledBitmap(maskBitmap, bitmap.width, bitmap.height, true)
-            
+
             activity?.runOnUiThread {
                 _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor)
             }
             if (Random().nextInt(100) < 5) {
-                addLog("YOLACT: MaxScore=${String.format("%.2f", maxScore)}, Time=${inferenceTime}ms")
+                addLog("YOLACT ($actualDelegate): Score=${String.format("%.2f", maxScore)}, Time=${inferenceTime}ms")
             }
         } else {
             if (Random().nextInt(100) < 5) {
-                addLog("YOLACT: No person (MaxScore=${String.format("%.2f", maxScore)})")
+                addLog("YOLACT ($actualDelegate): No person (${inferenceTime}ms)")
             }
         }
     }
@@ -373,19 +411,25 @@ class BodyChangerFragment : Fragment() {
         val width = 138
         val height = 138
         val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
-        val pixels = ByteBuffer.allocateDirect(width * height)
-        
+
+        val pixels = reusableMaskPixels ?: return maskBitmap
+        val protosArray = reusableProtosArray ?: return maskBitmap
+
         protos.rewind()
         val protosFloatBuffer = protos.asFloatBuffer()
-        
+
+        // 반복문 밖에서 통째로 복사하여 속도 극대화
+        protosFloatBuffer.get(protosArray)
+
+        pixels.rewind()
         for (y in 0 until height) {
             for (x in 0 until width) {
                 var sum = 0f
                 val offset = (y * width + x) * 32
                 for (k in 0 until 32) {
-                    sum += coeffs[k] * protosFloatBuffer.get(offset + k)
+                    sum += coeffs[k] * protosArray[offset + k]
                 }
-                val prob = 1.0f / (1.0f + exp(-sum).toFloat())
+                val prob = 1.0f / (1.0f + Math.exp(-sum.toDouble())).toFloat()
                 val alpha = if (prob > 0.5f) 255 else 0
                 pixels.put(alpha.toByte())
             }
