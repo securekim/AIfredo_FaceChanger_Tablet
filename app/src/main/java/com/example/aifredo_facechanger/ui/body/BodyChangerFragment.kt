@@ -336,9 +336,12 @@ class BodyChangerFragment : Fragment() {
                 val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
                 val pixels = ByteArray(width * height)
 
+                // Increase threshold and use binary masking for "cleaner" edges (no semi-transparency)
+                val threshold = 0.85f 
                 for (i in 0 until width * height) {
                     val confidence = maskBuffer.float
-                    pixels[i] = (confidence * 255).toInt().toByte()
+                    val alpha = if (confidence > threshold) 255 else 0
+                    pixels[i] = alpha.toByte()
                 }
 
                 maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
@@ -432,7 +435,8 @@ class BodyChangerFragment : Fragment() {
                 var sum = 0f
                 val offset = (y * width + x) * 32
                 for (k in 0 until 32) sum += coeffs[k] * protosArray[offset + k]
-                pixels.put(if (sum > 0f) 255.toByte() else 0.toByte())
+                // Increase mask threshold slightly (from 0.0 to 1.0) to shrink fuzzy edges
+                pixels.put(if (sum > 1.0f) 255.toByte() else 0.toByte())
             }
         }
         pixels.rewind()
@@ -463,9 +467,11 @@ class BodyChangerFragment : Fragment() {
         val pixels = reusableMaskPixels ?: return
         pixels.rewind()
 
-        // 256x256 alpha matte -> Bitmap.ALPHA_8
+        // Increase threshold and use binary masking for MODNet as well
+        val threshold = 0.8f
         for (i in 0 until (256 * 256)) {
-            val alpha = (outFloatBuffer.get() * 255).toInt().coerceIn(0, 255)
+            val confidence = outFloatBuffer.get()
+            val alpha = if (confidence > threshold) 255 else 0
             pixels.put(alpha.toByte())
         }
         pixels.rewind()
