@@ -16,7 +16,6 @@ class BodyOverlayView @JvmOverloads constructor(
     private var startColor: Int = Color.RED
     private var endColor: Int = Color.BLUE
 
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         // Keeps the destination (gradient) where the source (mask) is present
         xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
@@ -37,35 +36,53 @@ class BodyOverlayView @JvmOverloads constructor(
 
         val viewWidth = width.toFloat()
         val viewHeight = height.toFloat()
-        
-        // Right side only: from width/2 to width
+        if (viewWidth <= 0 || viewHeight <= 0) return
+
+        val maskWidth = mask.width.toFloat()
+        val maskHeight = mask.height.toFloat()
+
+        // Calculate aspect ratio scaling to match PreviewView's default FILL_CENTER
+        val scale: Float
+        val dx: Float
+        val dy: Float
+
+        val viewRatio = viewWidth / viewHeight
+        val maskRatio = maskWidth / maskHeight
+
+        if (maskRatio > viewRatio) {
+            // Mask is wider than view (relatively) -> match height, crop width
+            scale = viewHeight / maskHeight
+            dx = (viewWidth - maskWidth * scale) / 2f
+            dy = 0f
+        } else {
+            // View is wider than mask (relatively) -> match width, crop height
+            scale = viewWidth / maskWidth
+            dx = 0f
+            dy = (viewHeight - maskHeight * scale) / 2f
+        }
+
+        val drawRect = RectF(dx, dy, dx + maskWidth * scale, dy + maskHeight * scale)
+
+        // Split screen: Only draw on the right half
         val halfWidth = viewWidth / 2f
-        val destRect = RectF(halfWidth, 0f, viewWidth, viewHeight)
-        
-        // We only want to draw the mask/gradient on the right side.
-        // We need to clip the canvas to the right half.
         canvas.save()
         canvas.clipRect(halfWidth, 0f, viewWidth, viewHeight)
 
-        // Save layer for masking within the clipped area
-        val saveCount = canvas.saveLayer(halfWidth, 0f, viewWidth, viewHeight, null)
+        // Use a layer to apply the PorterDuff xfermode correctly
+        val saveCount = canvas.saveLayer(0f, 0f, viewWidth, viewHeight, null)
 
-        // Draw Gradient over the entire view (it will be clipped)
+        // 1. Draw Gradient (Destination)
         gradientPaint.shader = LinearGradient(
-            halfWidth, 0f, halfWidth, viewHeight,
+            0f, 0f, 0f, viewHeight,
             startColor, endColor, Shader.TileMode.CLAMP
         )
-        canvas.drawRect(destRect, gradientPaint)
+        // We draw the gradient over the whole view (it's clipped by the canvas anyway)
+        canvas.drawRect(0f, 0f, viewWidth, viewHeight, gradientPaint)
 
-        // Apply Mask (Segmentation Result)
-        // The mask defines where the gradient should be visible (the person)
-        // We use destRect so it stretches to cover the right half. 
-        // Note: The mask itself represents the full person, so stretching it to half might look weird if not handled.
-        // Usually, the mask matches the aspect ratio of the camera.
-        // If the camera is full screen, the mask is full screen. 
-        // We should draw the FULL mask but it will be clipped to the right half.
-        val fullRect = RectF(0f, 0f, viewWidth, viewHeight)
-        canvas.drawBitmap(mask, null, fullRect, maskPaint)
+        // 2. Draw Mask (Source) with DST_IN
+        // This will keep the gradient only where the mask has alpha (the person)
+        // Drawing it on drawRect ensures it aligns with the background camera preview
+        canvas.drawBitmap(mask, null, drawRect, maskPaint)
 
         canvas.restoreToCount(saveCount)
         canvas.restore()
