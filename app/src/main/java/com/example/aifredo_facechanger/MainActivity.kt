@@ -1,5 +1,6 @@
 package com.example.aifredo_facechanger
 
+import android.content.Context
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
@@ -32,7 +33,7 @@ class MainActivity : AppCompatActivity() {
         binding.navView?.let {
             appBarConfiguration = AppBarConfiguration(
                 setOf(
-                    R.id.nav_transform, R.id.nav_reflow, R.id.nav_slideshow, R.id.nav_voice, R.id.nav_settings
+                    R.id.nav_transform, R.id.nav_body_changer, R.id.nav_reflow, R.id.nav_slideshow, R.id.nav_voice, R.id.nav_settings
                 ),
                 binding.drawerLayout
             )
@@ -43,11 +44,26 @@ class MainActivity : AppCompatActivity() {
         binding.appBarMain.contentMain.bottomNavView?.let {
             appBarConfiguration = AppBarConfiguration(
                 setOf(
-                    R.id.nav_transform, R.id.nav_reflow, R.id.nav_slideshow
+                    R.id.nav_transform, R.id.nav_body_changer, R.id.nav_reflow, R.id.nav_slideshow
                 )
             )
             setupActionBarWithNavController(navController, appBarConfiguration)
             it.setupWithNavController(navController)
+        }
+
+        // Restore last menu
+        val sharedPref = getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE)
+        val lastNavId = sharedPref.getInt("last_nav_id", R.id.nav_transform)
+        
+        // Use post to ensure navigation happens after setup
+        binding.root.post {
+            if (navController.currentDestination?.id != lastNavId) {
+                navController.navigate(lastNavId)
+            }
+        }
+
+        navController.addOnDestinationChangedListener { _, destination, _ ->
+            sharedPref.edit().putInt("last_nav_id", destination.id).apply()
         }
     }
 

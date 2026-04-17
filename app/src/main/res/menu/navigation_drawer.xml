@@ -7,7 +7,11 @@
         <item
             android:id="@+id/nav_transform"
             android:icon="@drawable/ic_camera_black_24dp"
-            android:title="@string/menu_transform" />
+            android:title="@string/menu_face_changer" />
+        <item
+            android:id="@+id/nav_body_changer"
+            android:icon="@drawable/ic_camera_black_24dp"
+            android:title="@string/menu_body_changer" />
         <item
             android:id="@+id/nav_reflow"
             android:icon="@drawable/ic_gallery_black_24dp"

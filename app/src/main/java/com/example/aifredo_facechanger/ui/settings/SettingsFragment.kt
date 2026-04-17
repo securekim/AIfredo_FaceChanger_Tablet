@@ -8,6 +8,7 @@ import android.view.ViewGroup
 import androidx.fragment.app.Fragment
 import com.example.aifredo_facechanger.R
 import com.example.aifredo_facechanger.databinding.FragmentSettingsBinding
+import com.google.android.material.tabs.TabLayout
 
 class SettingsFragment : Fragment() {
 
@@ -28,7 +29,14 @@ class SettingsFragment : Fragment() {
         
         val sharedPref = activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE) ?: return
         
-        // --- Model Selection ---
+        setupTabLayout()
+        
+        // Restore last selected tab
+        val lastTab = sharedPref.getInt("last_settings_tab", 0)
+        binding.tabLayout.getTabAt(lastTab)?.select()
+        updateTabVisibility(lastTab)
+
+        // --- Face Settings ---
         val currentModel = sharedPref.getString("selected_model", "AnimeGAN_Hayao")
         when (currentModel) {
             "AnimeGAN_Hayao" -> binding.radioAnimeganHayao.isChecked = true
@@ -48,13 +56,9 @@ class SettingsFragment : Fragment() {
                 R.id.radio_semi_filter -> "SEMI_Filter"
                 else -> "AnimeGAN_Hayao"
             }
-            with(sharedPref.edit()) {
-                putString("selected_model", selectedModel)
-                apply()
-            }
+            sharedPref.edit().putString("selected_model", selectedModel).apply()
         }
 
-        // --- Delegate Selection ---
         val faceDelegate = sharedPref.getString("face_delegate", "CPU")
         if (faceDelegate == "GPU") binding.radioFaceGpu.isChecked = true else binding.radioFaceCpu.isChecked = true
         binding.radioGroupFaceDelegate.setOnCheckedChangeListener { _, checkedId ->
@@ -69,7 +73,6 @@ class SettingsFragment : Fragment() {
             sharedPref.edit().putString("pose_delegate", selected).apply()
         }
 
-        // --- Rendering Mode Selection ---
         val currentRenderMode = sharedPref.getString("render_mode", "Face_Only")
         when (currentRenderMode) {
             "Face_Only" -> binding.radioFaceOnly.isChecked = true
@@ -83,40 +86,87 @@ class SettingsFragment : Fragment() {
                 R.id.radio_full_frame -> "Full_Frame"
                 else -> "Face_Only"
             }
-            with(sharedPref.edit()) {
-                putString("render_mode", selectedMode)
-                apply()
-            }
+            sharedPref.edit().putString("render_mode", selectedMode).apply()
         }
 
-        // --- Resolution Selection ---
-        val currentResolution = sharedPref.getInt("model_resolution", 256)
-        when (currentResolution) {
-            256 -> binding.radioRes256.isChecked = true
-            512 -> binding.radioRes512.isChecked = true
-            else -> binding.radioRes256.isChecked = true
-        }
-
-        binding.radioGroupResolution.setOnCheckedChangeListener { _, checkedId ->
-            val selectedRes = when (checkedId) {
-                R.id.radio_res_256 -> 256
-                R.id.radio_res_512 -> 512
-                else -> 256
-            }
-            with(sharedPref.edit()) {
-                putInt("model_resolution", selectedRes)
-                apply()
-            }
-        }
-
-        // --- Landmark Options ---
-        val useFaceLandmark = sharedPref.getBoolean("use_face_landmark", true)
-        binding.switchUseFaceLandmark.isChecked = useFaceLandmark
+        binding.switchUseFaceLandmark.isChecked = sharedPref.getBoolean("use_face_landmark", true)
         binding.switchUseFaceLandmark.setOnCheckedChangeListener { _, isChecked ->
-            with(sharedPref.edit()) {
-                putBoolean("use_face_landmark", isChecked)
-                apply()
+            sharedPref.edit().putBoolean("use_face_landmark", isChecked).apply()
+        }
+
+        // --- Body Settings ---
+        val currentBodyModel = sharedPref.getString("body_model", "MediaPipe Pose")
+        when (currentBodyModel) {
+            "MediaPipe Pose" -> binding.radioBodyMediapipePose.isChecked = true
+            "ML Kit" -> binding.radioBodyMlkit.isChecked = true
+            "YOLACT" -> binding.radioBodyYolact.isChecked = true
+            "MODNet" -> binding.radioBodyModnet.isChecked = true
+            else -> binding.radioBodyMediapipePose.isChecked = true
+        }
+
+        binding.radioGroupBodyModel.setOnCheckedChangeListener { _, checkedId ->
+            val selected = when (checkedId) {
+                R.id.radio_body_mediapipe_pose -> "MediaPipe Pose"
+                R.id.radio_body_mlkit -> "ML Kit"
+                R.id.radio_body_yolact -> "YOLACT"
+                R.id.radio_body_modnet -> "MODNet"
+                else -> "MediaPipe Pose"
             }
+            sharedPref.edit().putString("body_model", selected).apply()
+        }
+
+        val bodyDelegate = sharedPref.getString("body_delegate", "CPU")
+        when (bodyDelegate) {
+            "GPU" -> binding.radioBodyGpu.isChecked = true
+            "NNAPI" -> binding.radioBodyNnapi.isChecked = true
+            else -> binding.radioBodyCpu.isChecked = true
+        }
+        binding.radioGroupBodyDelegate.setOnCheckedChangeListener { _, checkedId ->
+            val selected = when (checkedId) {
+                R.id.radio_body_gpu -> "GPU"
+                R.id.radio_body_nnapi -> "NNAPI"
+                else -> "CPU"
+            }
+            sharedPref.edit().putString("body_delegate", selected).apply()
+        }
+
+        binding.editBodyStartColor.setText(sharedPref.getString("body_start_color", "#FF0000"))
+        binding.editBodyEndColor.setText(sharedPref.getString("body_end_color", "#0000FF"))
+    }
+
+    private fun setupTabLayout() {
+        binding.tabLayout.addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
+            override fun onTabSelected(tab: TabLayout.Tab?) {
+                val position = tab?.position ?: 0
+                updateTabVisibility(position)
+                activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE)
+                    ?.edit()?.putInt("last_settings_tab", position)?.apply()
+            }
+            override fun onTabUnselected(tab: TabLayout.Tab?) {}
+            override fun onTabReselected(tab: TabLayout.Tab?) {}
+        })
+    }
+
+    private fun updateTabVisibility(position: Int) {
+        when (position) {
+            0 -> {
+                binding.layoutFaceSettings.visibility = View.VISIBLE
+                binding.layoutBodySettings.visibility = View.GONE
+            }
+            1 -> {
+                binding.layoutFaceSettings.visibility = View.GONE
+                binding.layoutBodySettings.visibility = View.VISIBLE
+            }
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        val sharedPref = activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE) ?: return
+        sharedPref.edit().apply {
+            putString("body_start_color", binding.editBodyStartColor.text.toString())
+            putString("body_end_color", binding.editBodyEndColor.text.toString())
+            apply()
         }
     }
 
