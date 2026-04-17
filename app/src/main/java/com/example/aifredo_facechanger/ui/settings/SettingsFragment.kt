@@ -95,24 +95,22 @@ class SettingsFragment : Fragment() {
         }
 
         // --- Body Settings ---
-        val currentBodyModel = sharedPref.getString("body_model", "MediaPipe")
+        val currentBodyModel = sharedPref.getString("body_model", "MediaPipe Pose")
         when (currentBodyModel) {
-            "MediaPipe" -> binding.radioBodyMediapipe.isChecked = true
+            "MediaPipe Pose" -> binding.radioBodyMediapipePose.isChecked = true
             "ML Kit" -> binding.radioBodyMlkit.isChecked = true
-            "YOLO" -> binding.radioBodyYolo.isChecked = true
             "YOLACT" -> binding.radioBodyYolact.isChecked = true
             "MODNet" -> binding.radioBodyModnet.isChecked = true
-            else -> binding.radioBodyMediapipe.isChecked = true
+            else -> binding.radioBodyMediapipePose.isChecked = true
         }
 
         binding.radioGroupBodyModel.setOnCheckedChangeListener { _, checkedId ->
             val selected = when (checkedId) {
-                R.id.radio_body_mediapipe -> "MediaPipe"
+                R.id.radio_body_mediapipe_pose -> "MediaPipe Pose"
                 R.id.radio_body_mlkit -> "ML Kit"
-                R.id.radio_body_yolo -> "YOLO"
                 R.id.radio_body_yolact -> "YOLACT"
                 R.id.radio_body_modnet -> "MODNet"
-                else -> "MediaPipe"
+                else -> "MediaPipe Pose"
             }
             sharedPref.edit().putString("body_model", selected).apply()
         }

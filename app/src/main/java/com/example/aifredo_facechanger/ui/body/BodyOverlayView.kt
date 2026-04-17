@@ -30,6 +30,13 @@ class BodyOverlayView @JvmOverloads constructor(
         postInvalidate()
     }
 
+    fun updateMaskOnly(mask: Bitmap?, startCol: Int, endCol: Int) {
+        maskBitmap = mask
+        startColor = startCol
+        endColor = endCol
+        postInvalidate()
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val mask = maskBitmap ?: return

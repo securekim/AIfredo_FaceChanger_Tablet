@@ -208,22 +208,16 @@
                     android:layout_marginTop="8dp">
 
                     <RadioButton
-                        android:id="@+id/radio_body_mediapipe"
+                        android:id="@+id/radio_body_mediapipe_pose"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="MediaPipe" />
+                        android:text="Mediapipe - Pose Landmark" />
 
                     <RadioButton
                         android:id="@+id/radio_body_mlkit"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="ML Kit" />
-
-                    <RadioButton
-                        android:id="@+id/radio_body_yolo"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:text="YOLO26-nano" />
 
                     <RadioButton
                         android:id="@+id/radio_body_yolact"

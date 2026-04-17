@@ -20,6 +20,14 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.Segmenter
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
+import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.framework.image.BitmapExtractor
+import com.google.mediapipe.framework.image.ByteBufferExtractor
+import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.core.Delegate
+import com.google.mediapipe.tasks.vision.core.RunningMode
+import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
+import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
@@ -45,6 +53,7 @@ class BodyChangerFragment : Fragment() {
     private var cameraExecutor: ExecutorService? = null
 
     private var mlKitSegmenter: Segmenter? = null
+    @Volatile private var poseLandmarker: PoseLandmarker? = null
     @Volatile private var yolactInterpreter: Interpreter? = null
     @Volatile private var modnetInterpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
@@ -74,7 +83,7 @@ class BodyChangerFragment : Fragment() {
 
     private var startColor: Int = Color.RED
     private var endColor: Int = Color.BLUE
-    private var selectedModel: String = "MediaPipe"
+    private var selectedModel: String = "MediaPipe Pose"
     private var selectedDelegate: String = "CPU"
     private var actualDelegate: String = "CPU"
 
@@ -115,7 +124,7 @@ class BodyChangerFragment : Fragment() {
     private fun loadSettings() {
         val sharedPref = activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE) ?: return
 
-        selectedModel = sharedPref.getString("body_model", "MediaPipe") ?: "MediaPipe"
+        selectedModel = sharedPref.getString("body_model", "MediaPipe Pose") ?: "MediaPipe Pose"
         selectedDelegate = sharedPref.getString("body_delegate", "CPU") ?: "CPU"
         val startColorStr = sharedPref.getString("body_start_color", "#FF0000") ?: "#FF0000"
         val endColorStr = sharedPref.getString("body_end_color", "#0000FF") ?: "#0000FF"
@@ -145,10 +154,11 @@ class BodyChangerFragment : Fragment() {
                     if (!isAdded) return@synchronized
 
                     when (selectedModel) {
+                        "MediaPipe Pose" -> initMediaPipePose()
                         "YOLACT" -> initYolact()
                         "MODNet" -> initModNet()
                         "ML Kit" -> initMlKit()
-                        else -> initMlKit()
+                        else -> initMediaPipePose()
                     }
                 }
             } finally {
@@ -161,6 +171,8 @@ class BodyChangerFragment : Fragment() {
         try {
             mlKitSegmenter?.close()
             mlKitSegmenter = null
+            poseLandmarker?.close()
+            poseLandmarker = null
             yolactInterpreter?.close()
             yolactInterpreter = null
             modnetInterpreter?.close()
@@ -171,6 +183,77 @@ class BodyChangerFragment : Fragment() {
             nnApiDelegate = null
         } catch (e: Exception) {
             Log.e(TAG, "Error closing existing segmenter", e)
+        }
+    }
+
+    private fun initMediaPipePose() {
+        addLog("Initializing MediaPipe Pose Landmark with $selectedDelegate")
+        try {
+            val baseOptionsBuilder = BaseOptions.builder()
+                .setModelAssetPath("pose_landmarker_lite.task")
+            
+            when (selectedDelegate.uppercase()) {
+                "GPU" -> baseOptionsBuilder.setDelegate(Delegate.GPU)
+                else -> baseOptionsBuilder.setDelegate(Delegate.CPU)
+            }
+
+            val optionsBuilder = PoseLandmarker.PoseLandmarkerOptions.builder()
+                .setBaseOptions(baseOptionsBuilder.build())
+                .setRunningMode(RunningMode.LIVE_STREAM)
+                .setOutputSegmentationMasks(true)
+                .setResultListener { result, image ->
+                    processMediaPipePoseResult(result, image.width, image.height)
+                }
+
+            poseLandmarker = PoseLandmarker.createFromOptions(requireContext(), optionsBuilder.build())
+            actualDelegate = selectedDelegate
+            addLog(">> MediaPipe Pose Ready ($actualDelegate)")
+        } catch (e: Exception) {
+            addLog("MediaPipe Pose Init Error: ${e.message}")
+            Log.e(TAG, "MediaPipe Pose Init Error", e)
+        }
+    }
+
+    private fun processMediaPipePoseResult(result: PoseLandmarkerResult, originalWidth: Int, originalHeight: Int) {
+        val segmentationMasks = result.segmentationMasks()
+        if (segmentationMasks.isPresent && segmentationMasks.get().isNotEmpty()) {
+            val mask = segmentationMasks.get()[0]
+            
+            try {
+                val width = mask.width
+                val height = mask.height
+                val byteBuffer = ByteBufferExtractor.extract(mask)
+                byteBuffer.rewind()
+
+                val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
+                val pixels = ByteArray(width * height)
+                
+                // Pose Landmarker의 segmentation mask는 일반적으로 FLOAT32(확률값) 형식입니다.
+                // FLOAT32는 픽셀당 4바이트이므로 버퍼 크기를 확인합니다.
+                if (byteBuffer.capacity() >= width * height * 4) {
+                    for (i in 0 until width * height) {
+                        val confidence = byteBuffer.float
+                        // 임계값 0.5를 기준으로 마스크 생성
+                        val alpha = if (confidence > 0.5f) 255 else 0
+                        pixels[i] = alpha.toByte()
+                    }
+                } else {
+                    // UINT8 형식일 경우의 폴백 처리
+                    byteBuffer.get(pixels)
+                }
+                
+                maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
+                
+                // 마스크를 화면 크기에 맞게 스케일링
+                val finalMask = Bitmap.createScaledBitmap(maskBitmap, originalWidth, originalHeight, true)
+                maskBitmap.recycle()
+                
+                activity?.runOnUiThread {
+                    _binding?.bodyOverlay?.updateMaskOnly(finalMask, startColor, endColor)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error processing MediaPipe Pose mask", e)
+            }
         }
     }
 
@@ -314,9 +397,16 @@ class BodyChangerFragment : Fragment() {
 
         synchronized(segmenterLock) {
             when (selectedModel) {
-                "YOLACT" -> if (yolactInterpreter != null) processYolact(bitmap)
-                "MODNet" -> if (modnetInterpreter != null) processModNet(bitmap)
-                "ML Kit" -> if (mlKitSegmenter != null) processMlKit(bitmap)
+                "MediaPipe Pose" -> {
+                    poseLandmarker?.let {
+                        val mpImage = BitmapImageBuilder(bitmap).build()
+                        it.detectAsync(mpImage, System.currentTimeMillis())
+                    }
+                }
+                "YOLACT" -> yolactInterpreter?.let { processYolact(bitmap) }
+                "MODNet" -> modnetInterpreter?.let { processModNet(bitmap) }
+                "ML Kit" -> mlKitSegmenter?.let { processMlKit(bitmap) }
+                else -> {}
             }
         }
         imageProxy.close()
