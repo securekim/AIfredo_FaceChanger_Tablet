@@ -82,6 +82,11 @@ dependencies {
     implementation(libs.tensorflow.lite.gpu.api)
     implementation(libs.tensorflow.lite.support)
 
+    // Media3 (RTSP)
+    implementation(libs.androidx.media3.exoplayer)
+    implementation(libs.androidx.media3.exoplayer.rtsp)
+    implementation(libs.androidx.media3.ui)
+
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

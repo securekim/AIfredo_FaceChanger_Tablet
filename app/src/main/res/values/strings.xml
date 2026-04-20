@@ -27,8 +27,16 @@
 
     <string name="tab_face">Face</string>
     <string name="tab_body">Body</string>
+    <string name="tab_cam">CAM</string>
     <string name="settings_body_model">Body Segmentation Model</string>
     <string name="settings_body_delegate">Segmentation Delegate</string>
     <string name="settings_body_gradient_start_color">Gradient Start Color</string>
     <string name="settings_body_gradient_end_color">Gradient End Color</string>
+
+    <string name="settings_cam_source">Camera Source</string>
+    <string name="settings_cam_embedded">Embedded Camera</string>
+    <string name="settings_cam_rtsp">Webcam (RTSP)</string>
+    <string name="settings_rtsp_ip">RTSP IP (e.g., 192.168.1.10:554/live)</string>
+    <string name="settings_rtsp_id">ID</string>
+    <string name="settings_rtsp_pw">Password</string>
 </resources>

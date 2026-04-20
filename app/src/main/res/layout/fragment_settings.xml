@@ -21,6 +21,11 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/tab_body" />
+
+        <com.google.android.material.tabs.TabItem
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/tab_cam" />
     </com.google.android.material.tabs.TabLayout>
 
     <FrameLayout
@@ -293,6 +298,94 @@
                     android:layout_height="wrap_content"
                     android:hint="#0000FF"
                     android:inputType="text" />
+
+            </LinearLayout>
+        </ScrollView>
+
+        <!-- CAM Settings -->
+        <ScrollView
+            android:id="@+id/layout_cam_settings"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:padding="16dp"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/settings_cam_source"
+                    android:textSize="18sp" />
+
+                <RadioGroup
+                    android:id="@+id/radioGroup_cam_source"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp">
+
+                    <RadioButton
+                        android:id="@+id/radio_cam_embedded"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_cam_embedded" />
+
+                    <RadioButton
+                        android:id="@+id/radio_cam_rtsp"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_cam_rtsp" />
+                </RadioGroup>
+
+                <LinearLayout
+                    android:id="@+id/layout_rtsp_fields"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:layout_marginTop="16dp"
+                    android:visibility="gone">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_rtsp_ip" />
+
+                    <EditText
+                        android:id="@+id/edit_rtsp_ip"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:hint="192.168.1.10:554/live"
+                        android:inputType="text" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/settings_rtsp_id" />
+
+                    <EditText
+                        android:id="@+id/edit_rtsp_id"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:hint="admin"
+                        android:inputType="text" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="@string/settings_rtsp_pw" />
+
+                    <EditText
+                        android:id="@+id/edit_rtsp_pw"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:hint="password"
+                        android:inputType="textPassword" />
+                </LinearLayout>
 
             </LinearLayout>
         </ScrollView>

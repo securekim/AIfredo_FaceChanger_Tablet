@@ -132,6 +132,26 @@ class SettingsFragment : Fragment() {
 
         binding.editBodyStartColor.setText(sharedPref.getString("body_start_color", "#FF0000"))
         binding.editBodyEndColor.setText(sharedPref.getString("body_end_color", "#0000FF"))
+
+        // --- CAM Settings ---
+        val camSource = sharedPref.getString("cam_source", "Embedded")
+        if (camSource == "RTSP") {
+            binding.radioCamRtsp.isChecked = true
+            binding.layoutRtspFields.visibility = View.VISIBLE
+        } else {
+            binding.radioCamEmbedded.isChecked = true
+            binding.layoutRtspFields.visibility = View.GONE
+        }
+
+        binding.radioGroupCamSource.setOnCheckedChangeListener { _, checkedId ->
+            val selected = if (checkedId == R.id.radio_cam_rtsp) "RTSP" else "Embedded"
+            sharedPref.edit().putString("cam_source", selected).apply()
+            binding.layoutRtspFields.visibility = if (selected == "RTSP") View.VISIBLE else View.GONE
+        }
+
+        binding.editRtspIp.setText(sharedPref.getString("rtsp_ip", ""))
+        binding.editRtspId.setText(sharedPref.getString("rtsp_id", ""))
+        binding.editRtspPw.setText(sharedPref.getString("rtsp_pw", ""))
     }
 
     private fun setupTabLayout() {
@@ -148,16 +168,9 @@ class SettingsFragment : Fragment() {
     }
 
     private fun updateTabVisibility(position: Int) {
-        when (position) {
-            0 -> {
-                binding.layoutFaceSettings.visibility = View.VISIBLE
-                binding.layoutBodySettings.visibility = View.GONE
-            }
-            1 -> {
-                binding.layoutFaceSettings.visibility = View.GONE
-                binding.layoutBodySettings.visibility = View.VISIBLE
-            }
-        }
+        binding.layoutFaceSettings.visibility = if (position == 0) View.VISIBLE else View.GONE
+        binding.layoutBodySettings.visibility = if (position == 1) View.VISIBLE else View.GONE
+        binding.layoutCamSettings.visibility = if (position == 2) View.VISIBLE else View.GONE
     }
 
     override fun onPause() {
@@ -166,6 +179,9 @@ class SettingsFragment : Fragment() {
         sharedPref.edit().apply {
             putString("body_start_color", binding.editBodyStartColor.text.toString())
             putString("body_end_color", binding.editBodyEndColor.text.toString())
+            putString("rtsp_ip", binding.editRtspIp.text.toString())
+            putString("rtsp_id", binding.editRtspId.text.toString())
+            putString("rtsp_pw", binding.editRtspPw.text.toString())
             apply()
         }
     }

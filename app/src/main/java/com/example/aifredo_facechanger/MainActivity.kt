@@ -42,28 +42,49 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.appBarMain.contentMain.bottomNavView?.let {
-            appBarConfiguration = AppBarConfiguration(
-                setOf(
-                    R.id.nav_transform, R.id.nav_body_changer, R.id.nav_reflow, R.id.nav_slideshow
-                )
+            // If both drawer and bottom nav are used, we should ideally merge the top-level destinations
+            val topLevelDestinations = setOf(
+                R.id.nav_transform, R.id.nav_body_changer, R.id.nav_reflow, R.id.nav_slideshow, R.id.nav_voice, R.id.nav_settings
             )
+            appBarConfiguration = AppBarConfiguration(topLevelDestinations, binding.drawerLayout)
             setupActionBarWithNavController(navController, appBarConfiguration)
             it.setupWithNavController(navController)
         }
 
         // Restore last menu
         val sharedPref = getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE)
-        val lastNavId = sharedPref.getInt("last_nav_id", R.id.nav_transform)
+        // Using resource name instead of ID for persistence to avoid issues with shifting resource IDs between builds
+        val lastNavName = sharedPref.getString("last_nav_name", null)
+        val lastNavId = if (lastNavName != null) {
+            resources.getIdentifier(lastNavName, "id", packageName)
+        } else {
+            sharedPref.getInt("last_nav_id", R.id.nav_transform)
+        }
         
         // Use post to ensure navigation happens after setup
         binding.root.post {
-            if (navController.currentDestination?.id != lastNavId) {
-                navController.navigate(lastNavId)
+            if (navController.currentDestination?.id != lastNavId && lastNavId != 0) {
+                try {
+                    // Check if the destination exists in the navigation graph before attempting to navigate
+                    if (navController.graph.findNode(lastNavId) != null) {
+                        navController.navigate(lastNavId)
+                    }
+                } catch (e: Exception) {
+                    // If navigation fails (e.g. invalid destination for current state), stay at current/start
+                }
             }
         }
 
         navController.addOnDestinationChangedListener { _, destination, _ ->
-            sharedPref.edit().putInt("last_nav_id", destination.id).apply()
+            try {
+                val entryName = resources.getResourceEntryName(destination.id)
+                sharedPref.edit()
+                    .putInt("last_nav_id", destination.id)
+                    .putString("last_nav_name", entryName)
+                    .apply()
+            } catch (e: Exception) {
+                sharedPref.edit().putInt("last_nav_id", destination.id).apply()
+            }
         }
     }
 

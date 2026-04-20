@@ -5,24 +5,30 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.*
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.util.Size
 import android.view.LayoutInflater
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.OptIn
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
+import androidx.media3.common.MediaItem
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import com.example.aifredo_facechanger.databinding.FragmentBodyChangerBinding
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.Segmenter
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
 import com.google.mediapipe.framework.image.BitmapImageBuilder
-import com.google.mediapipe.framework.image.BitmapExtractor
-import com.google.mediapipe.framework.image.ByteBufferExtractor
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
@@ -59,22 +65,17 @@ class BodyChangerFragment : Fragment() {
     private var gpuDelegate: GpuDelegate? = null
     private var nnApiDelegate: NnApiDelegate? = null
 
-    // TFLite 지원 객체
     private var yolactImageProcessor: ImageProcessor? = null
     private var modnetImageProcessor: ImageProcessor? = null
     private var yolactTensorImage: TensorImage? = null
     private var modnetTensorImage: TensorImage? = null
 
-    // YOLACT 전용 버퍼
     private var yolactOutputBoxes: ByteBuffer? = null
     private var yolactOutputScores: ByteBuffer? = null
     private var yolactOutputCoeffs: ByteBuffer? = null
     private var yolactOutputProtos: ByteBuffer? = null
-
-    // MODNet 전용 버퍼
     private var modnetOutputBuffer: ByteBuffer? = null
 
-    // 성능 최적화를 위한 전역 재사용 버퍼
     private var reusableMaskPixels: ByteBuffer? = null
     private var reusableProtosArray: FloatArray? = null
     private var reusableScoresArray: FloatArray? = null
@@ -93,6 +94,19 @@ class BodyChangerFragment : Fragment() {
     private val YOLACT_MODEL_FILE = "yolact_550x550_model_float16_quant.tflite"
     private val MODNET_MODEL_FILE = "MODNet_256x256_model_float16_quant.tflite"
 
+    // RTSP
+    private var exoPlayer: ExoPlayer? = null
+    private var isRtspMode = false
+    private val rtspFrameHandler = Handler(Looper.getMainLooper())
+    private val rtspFrameRunnable = object : Runnable {
+        override fun run() {
+            if (isRtspMode && exoPlayer?.isPlaying == true) {
+                extractFrameFromPlayer()
+            }
+            rtspFrameHandler.postDelayed(this, 40)
+        }
+    }
+
     companion object {
         private val sharedSegmenterExecutor: ExecutorService = Executors.newSingleThreadExecutor()
         @Volatile private var isInitializing = false
@@ -100,7 +114,7 @@ class BodyChangerFragment : Fragment() {
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { startCamera() }
+    ) { startStream() }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         _binding = FragmentBodyChangerBinding.inflate(inflater, container, false)
@@ -111,13 +125,18 @@ class BodyChangerFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         cameraExecutor = Executors.newSingleThreadExecutor()
 
-        if (allPermissionsGranted()) startCamera()
+        if (allPermissionsGranted()) startStream()
         else requestPermissionLauncher.launch(arrayOf(Manifest.permission.CAMERA))
     }
 
     override fun onResume() {
         super.onResume()
+        val oldRtspMode = isRtspMode
         loadSettings()
+        
+        if (oldRtspMode != isRtspMode) {
+            startStream()
+        }
         setupSegmenter()
     }
 
@@ -128,6 +147,7 @@ class BodyChangerFragment : Fragment() {
         selectedDelegate = sharedPref.getString("body_delegate", "CPU") ?: "CPU"
         val startColorStr = sharedPref.getString("body_start_color", "#FF0000") ?: "#FF0000"
         val endColorStr = sharedPref.getString("body_end_color", "#0000FF") ?: "#0000FF"
+        isRtspMode = sharedPref.getString("cam_source", "Embedded") == "RTSP"
 
         try {
             startColor = Color.parseColor(startColorStr)
@@ -136,23 +156,18 @@ class BodyChangerFragment : Fragment() {
             startColor = Color.RED
             endColor = Color.BLUE
         }
-        addLog("Settings: Model=$selectedModel, Delegate=$selectedDelegate")
     }
 
     private fun setupSegmenter() {
         if (isInitializing) return
-
         isInitializing = true
         sharedSegmenterExecutor.execute {
             try {
                 synchronized(segmenterLock) {
                     closeCurrentSegmenter()
-
                     System.gc()
                     try { Thread.sleep(300) } catch (e: Exception) {}
-
                     if (!isAdded) return@synchronized
-
                     when (selectedModel) {
                         "MediaPipe Pose" -> initMediaPipePose()
                         "YOLACT" -> initYolact()
@@ -169,33 +184,20 @@ class BodyChangerFragment : Fragment() {
 
     private fun closeCurrentSegmenter() {
         try {
-            mlKitSegmenter?.close()
-            mlKitSegmenter = null
-            poseLandmarker?.close()
-            poseLandmarker = null
-            yolactInterpreter?.close()
-            yolactInterpreter = null
-            modnetInterpreter?.close()
-            modnetInterpreter = null
-            gpuDelegate?.close()
-            gpuDelegate = null
-            nnApiDelegate?.close()
-            nnApiDelegate = null
-        } catch (e: Exception) {
-            Log.e(TAG, "Error closing existing segmenter", e)
-        }
+            mlKitSegmenter?.close(); mlKitSegmenter = null
+            poseLandmarker?.close(); poseLandmarker = null
+            yolactInterpreter?.close(); yolactInterpreter = null
+            modnetInterpreter?.close(); modnetInterpreter = null
+            gpuDelegate?.close(); gpuDelegate = null
+            nnApiDelegate?.close(); nnApiDelegate = null
+        } catch (e: Exception) {}
     }
 
     private fun initMediaPipePose() {
-        addLog("Initializing MediaPipe Pose Landmark with $selectedDelegate")
         try {
-            val baseOptionsBuilder = BaseOptions.builder()
-                .setModelAssetPath("pose_landmarker_lite.task")
-            
-            when (selectedDelegate.uppercase()) {
-                "GPU" -> baseOptionsBuilder.setDelegate(Delegate.GPU)
-                else -> baseOptionsBuilder.setDelegate(Delegate.CPU)
-            }
+            val baseOptionsBuilder = BaseOptions.builder().setModelAssetPath("pose_landmarker_lite.task")
+            if (selectedDelegate.uppercase() == "GPU") baseOptionsBuilder.setDelegate(Delegate.GPU)
+            else baseOptionsBuilder.setDelegate(Delegate.CPU)
 
             val optionsBuilder = PoseLandmarker.PoseLandmarkerOptions.builder()
                 .setBaseOptions(baseOptionsBuilder.build())
@@ -210,7 +212,6 @@ class BodyChangerFragment : Fragment() {
             addLog(">> MediaPipe Pose Ready ($actualDelegate)")
         } catch (e: Exception) {
             addLog("MediaPipe Pose Init Error: ${e.message}")
-            Log.e(TAG, "MediaPipe Pose Init Error", e)
         }
     }
 
@@ -218,408 +219,266 @@ class BodyChangerFragment : Fragment() {
         val segmentationMasks = result.segmentationMasks()
         if (segmentationMasks.isPresent && segmentationMasks.get().isNotEmpty()) {
             val mask = segmentationMasks.get()[0]
-            
             try {
                 val width = mask.width
                 val height = mask.height
-                val byteBuffer = ByteBufferExtractor.extract(mask)
+                val byteBuffer = com.google.mediapipe.framework.image.ByteBufferExtractor.extract(mask)
                 byteBuffer.rewind()
-
                 val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
                 val pixels = ByteArray(width * height)
-                
-                // Pose Landmarker의 segmentation mask는 일반적으로 FLOAT32(확률값) 형식입니다.
-                // FLOAT32는 픽셀당 4바이트이므로 버퍼 크기를 확인합니다.
                 if (byteBuffer.capacity() >= width * height * 4) {
                     for (i in 0 until width * height) {
-                        val confidence = byteBuffer.float
-                        // 임계값 0.5를 기준으로 마스크 생성
-                        val alpha = if (confidence > 0.5f) 255 else 0
+                        val alpha = if (byteBuffer.float > 0.5f) 255 else 0
                         pixels[i] = alpha.toByte()
                     }
                 } else {
-                    // UINT8 형식일 경우의 폴백 처리
                     byteBuffer.get(pixels)
                 }
-                
                 maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
-                
-                // 마스크를 화면 크기에 맞게 스케일링
                 val finalMask = Bitmap.createScaledBitmap(maskBitmap, originalWidth, originalHeight, true)
                 maskBitmap.recycle()
-                
-                activity?.runOnUiThread {
-                    _binding?.bodyOverlay?.updateMaskOnly(finalMask, startColor, endColor)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error processing MediaPipe Pose mask", e)
-            }
+                activity?.runOnUiThread { _binding?.bodyOverlay?.updateMaskOnly(finalMask, startColor, endColor) }
+            } catch (e: Exception) {}
         }
     }
 
     private fun initMlKit() {
-        addLog("Initializing ML Kit")
         actualDelegate = "N/A (ML Kit)"
         try {
-            val options = SelfieSegmenterOptions.Builder()
-                .setDetectorMode(SelfieSegmenterOptions.STREAM_MODE)
-                .build()
+            val options = SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.STREAM_MODE).build()
             mlKitSegmenter = Segmentation.getClient(options)
             addLog(">> ML Kit Ready")
-        } catch (e: Exception) {
-            addLog("ML Kit Error: ${e.message}")
-        }
+        } catch (e: Exception) { addLog("ML Kit Error: ${e.message}") }
     }
 
     private fun getInterpreterOptions(): Interpreter.Options {
         val options = Interpreter.Options()
         actualDelegate = "CPU"
-
-        when (selectedDelegate.uppercase()) {
-            "GPU" -> {
-                try {
-                    val compatList = CompatibilityList()
-                    if (compatList.isDelegateSupportedOnThisDevice) {
-                        val gpuOptions = GpuDelegate.Options().apply {
-                            setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
-                        }
-                        gpuDelegate = GpuDelegate(gpuOptions)
-                        options.addDelegate(gpuDelegate)
-                        actualDelegate = "GPU"
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "GPU Delegate error", e)
+        if (selectedDelegate.uppercase() == "GPU") {
+            try {
+                if (CompatibilityList().isDelegateSupportedOnThisDevice) {
+                    gpuDelegate = GpuDelegate(GpuDelegate.Options().apply { setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED) })
+                    options.addDelegate(gpuDelegate); actualDelegate = "GPU"
                 }
-            }
-            "NNAPI" -> {
-                try {
-                    nnApiDelegate = NnApiDelegate()
-                    options.addDelegate(nnApiDelegate)
-                    actualDelegate = "NNAPI"
-                } catch (e: Exception) {
-                    Log.e(TAG, "NNAPI Delegate error", e)
-                }
-            }
+            } catch (e: Exception) {}
+        } else if (selectedDelegate.uppercase() == "NNAPI") {
+            try { nnApiDelegate = NnApiDelegate(); options.addDelegate(nnApiDelegate); actualDelegate = "NNAPI" } catch (e: Exception) {}
         }
         return options
     }
 
     private fun initYolact() {
-        addLog("Initializing YOLACT with $selectedDelegate")
         try {
-            val options = getInterpreterOptions()
-            val modelBuffer = FileUtil.loadMappedFile(requireContext(), YOLACT_MODEL_FILE)
-            val interpreter = Interpreter(modelBuffer, options)
+            val interpreter = Interpreter(FileUtil.loadMappedFile(requireContext(), YOLACT_MODEL_FILE), getInterpreterOptions())
             yolactInterpreter = interpreter
-
-            yolactImageProcessor = ImageProcessor.Builder()
-                .add(ResizeOp(550, 550, ResizeOp.ResizeMethod.BILINEAR))
-                .add(NormalizeOp(floatArrayOf(123.675f, 116.28f, 103.53f), floatArrayOf(58.395f, 57.12f, 57.375f)))
-                .build()
+            yolactImageProcessor = ImageProcessor.Builder().add(ResizeOp(550, 550, ResizeOp.ResizeMethod.BILINEAR)).add(NormalizeOp(floatArrayOf(123.675f, 116.28f, 103.53f), floatArrayOf(58.395f, 57.12f, 57.375f))).build()
             yolactTensorImage = TensorImage(DataType.FLOAT32)
-
-            yolactOutputBoxes = ByteBuffer.allocateDirect(19248 * 4 * 4).apply { order(ByteOrder.nativeOrder()) }
-            yolactOutputScores = ByteBuffer.allocateDirect(19248 * 81 * 4).apply { order(ByteOrder.nativeOrder()) }
-            yolactOutputCoeffs = ByteBuffer.allocateDirect(19248 * 32 * 4).apply { order(ByteOrder.nativeOrder()) }
-            yolactOutputProtos = ByteBuffer.allocateDirect(138 * 138 * 32 * 4).apply { order(ByteOrder.nativeOrder()) }
-
-            reusableMaskPixels = ByteBuffer.allocateDirect(138 * 138).apply { order(ByteOrder.nativeOrder()) }
+            yolactOutputBoxes = ByteBuffer.allocateDirect(19248 * 4 * 4).order(ByteOrder.nativeOrder())
+            yolactOutputScores = ByteBuffer.allocateDirect(19248 * 81 * 4).order(ByteOrder.nativeOrder())
+            yolactOutputCoeffs = ByteBuffer.allocateDirect(19248 * 32 * 4).order(ByteOrder.nativeOrder())
+            yolactOutputProtos = ByteBuffer.allocateDirect(138 * 138 * 32 * 4).order(ByteOrder.nativeOrder())
+            reusableMaskPixels = ByteBuffer.allocateDirect(256 * 256).order(ByteOrder.nativeOrder())
             reusableProtosArray = FloatArray(138 * 138 * 32)
             reusableScoresArray = FloatArray(19248 * 81)
-
             addLog(">> YOLACT Ready ($actualDelegate)")
-        } catch (e: Exception) {
-            addLog("YOLACT Init Error: ${e.message}")
-        }
+        } catch (e: Exception) { addLog("YOLACT Init Error: ${e.message}") }
     }
 
     private fun initModNet() {
-        addLog("Initializing MODNet with $selectedDelegate")
         try {
-            val options = getInterpreterOptions()
-            val modelBuffer = FileUtil.loadMappedFile(requireContext(), MODNET_MODEL_FILE)
-            val interpreter = Interpreter(modelBuffer, options)
-            modnetInterpreter = interpreter
-
-            modnetImageProcessor = ImageProcessor.Builder()
-                .add(ResizeOp(256, 256, ResizeOp.ResizeMethod.BILINEAR))
-                .add(NormalizeOp(floatArrayOf(127.5f, 127.5f, 127.5f), floatArrayOf(127.5f, 127.5f, 127.5f)))
-                .build()
+            modnetInterpreter = Interpreter(FileUtil.loadMappedFile(requireContext(), MODNET_MODEL_FILE), getInterpreterOptions())
+            modnetImageProcessor = ImageProcessor.Builder().add(ResizeOp(256, 256, ResizeOp.ResizeMethod.BILINEAR)).add(NormalizeOp(floatArrayOf(127.5f, 127.5f, 127.5f), floatArrayOf(127.5f, 127.5f, 127.5f))).build()
             modnetTensorImage = TensorImage(DataType.FLOAT32)
-
-            // MODNet Output: 1x256x256x1 (Float32)
-            modnetOutputBuffer = ByteBuffer.allocateDirect(1 * 256 * 256 * 1 * 4).apply { order(ByteOrder.nativeOrder()) }
-            reusableMaskPixels = ByteBuffer.allocateDirect(256 * 256).apply { order(ByteOrder.nativeOrder()) }
-
+            modnetOutputBuffer = ByteBuffer.allocateDirect(1 * 256 * 256 * 1 * 4).order(ByteOrder.nativeOrder())
+            reusableMaskPixels = ByteBuffer.allocateDirect(256 * 256).order(ByteOrder.nativeOrder())
             addLog(">> MODNet Ready ($actualDelegate)")
-        } catch (e: Exception) {
-            addLog("MODNet Init Error: ${e.message}")
-            Log.e(TAG, "MODNet Init Error", e)
-        }
+        } catch (e: Exception) { addLog("MODNet Init Error: ${e.message}") }
+    }
+
+    private fun startStream() {
+        if (isRtspMode) startRtsp() else startCamera()
     }
 
     private fun startCamera() {
-        val context = context ?: return
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+        stopRtsp()
+        _binding?.viewFinder?.visibility = View.VISIBLE
+        _binding?.playerView?.visibility = View.GONE
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(requireContext())
         cameraProviderFuture.addListener({
             val cameraProvider = try { cameraProviderFuture.get() } catch (e: Exception) { return@addListener }
-
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(binding.viewFinder.surfaceProvider)
-            }
-
+            val preview = Preview.Builder().build().also { it.setSurfaceProvider(binding.viewFinder.surfaceProvider) }
             val imageAnalyzer = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .setTargetResolution(Size(640, 480))
-                .build()
-                .also {
-                    it.setAnalyzer(cameraExecutor!!) { imageProxy ->
-                        processFrame(imageProxy)
-                    }
-                }
-
+                .build().also { it.setAnalyzer(cameraExecutor!!) { proxy -> processFrame(proxy) } }
             try {
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(viewLifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, preview, imageAnalyzer)
-            } catch (e: Exception) {
-                Log.e(TAG, "Camera binding failed", e)
-            }
-        }, ContextCompat.getMainExecutor(context))
+                addLog("Camera started")
+            } catch (e: Exception) {}
+        }, ContextCompat.getMainExecutor(requireContext()))
+    }
+
+    @OptIn(UnstableApi::class)
+    private fun startRtsp() {
+        stopCamera()
+        _binding?.viewFinder?.visibility = View.GONE
+        _binding?.playerView?.visibility = View.VISIBLE
+        val sharedPref = activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE) ?: return
+        val ip = sharedPref.getString("rtsp_ip", "") ?: ""
+        val id = sharedPref.getString("rtsp_id", "") ?: ""
+        val pw = sharedPref.getString("rtsp_pw", "") ?: ""
+        if (ip.isEmpty()) { addLog("RTSP IP is empty."); return }
+        val rtspUrl = if (id.isNotEmpty() && pw.isNotEmpty()) "rtsp://$id:$pw@$ip" else "rtsp://$ip"
+        addLog("Connecting RTSP: $rtspUrl")
+        exoPlayer = ExoPlayer.Builder(requireContext()).build().apply {
+            setMediaSource(RtspMediaSource.Factory().createMediaSource(MediaItem.fromUri(rtspUrl)))
+            prepare(); playWhenReady = true
+        }
+        binding.playerView.player = exoPlayer
+        rtspFrameHandler.post(rtspFrameRunnable)
+    }
+
+    private fun extractFrameFromPlayer() {
+        val b = _binding ?: return
+        val textureView = b.playerView.videoSurfaceView as? TextureView ?: return
+        val bitmap = textureView.getBitmap() ?: return
+        processFrameBitmap(bitmap)
+    }
+
+    private fun stopCamera() {
+        try { ProcessCameraProvider.getInstance(requireContext()).get().unbindAll() } catch (e: Exception) {}
+    }
+
+    private fun stopRtsp() {
+        rtspFrameHandler.removeCallbacks(rtspFrameRunnable)
+        exoPlayer?.release(); exoPlayer = null
+        _binding?.playerView?.player = null
     }
 
     private fun processFrame(imageProxy: ImageProxy) {
         val bitmap = processImageProxy(imageProxy)
-        if (bitmap == null) {
-            imageProxy.close()
-            return
-        }
-
-        synchronized(segmenterLock) {
-            when (selectedModel) {
-                "MediaPipe Pose" -> {
-                    poseLandmarker?.let {
-                        val mpImage = BitmapImageBuilder(bitmap).build()
-                        it.detectAsync(mpImage, System.currentTimeMillis())
-                    }
-                }
-                "YOLACT" -> yolactInterpreter?.let { processYolact(bitmap) }
-                "MODNet" -> modnetInterpreter?.let { processModNet(bitmap) }
-                "ML Kit" -> mlKitSegmenter?.let { processMlKit(bitmap) }
-                else -> {}
-            }
-        }
+        if (bitmap != null) processFrameBitmap(bitmap)
         imageProxy.close()
     }
 
-    private fun processMlKit(bitmap: Bitmap) {
-        val startTime = System.currentTimeMillis()
-        val inputImage = InputImage.fromBitmap(bitmap, 0)
-        mlKitSegmenter?.process(inputImage)
-            ?.addOnSuccessListener { result ->
-                val inferenceTime = System.currentTimeMillis() - startTime
-                val maskBuffer = result.buffer
-                maskBuffer.rewind()
-
-                val width = result.width
-                val height = result.height
-                val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
-                val pixels = ByteArray(width * height)
-
-                // Decreased threshold to expand masking area (from 0.85f to 0.45f)
-                val threshold = 0.45f 
-                for (i in 0 until width * height) {
-                    val confidence = maskBuffer.float
-                    val alpha = if (confidence > threshold) 255 else 0
-                    pixels[i] = alpha.toByte()
-                }
-
-                maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
-
-                activity?.runOnUiThread {
-                    _binding?.bodyOverlay?.updateData(maskBitmap, bitmap, startColor, endColor)
-                }
-                
-                if (Random().nextInt(100) < 5) addLog("ML Kit: Time=${inferenceTime}ms")
+    private fun processFrameBitmap(bitmap: Bitmap) {
+        synchronized(segmenterLock) {
+            when (selectedModel) {
+                "MediaPipe Pose" -> poseLandmarker?.detectAsync(BitmapImageBuilder(bitmap).build(), System.currentTimeMillis())
+                "YOLACT" -> processYolact(bitmap)
+                "MODNet" -> processModNet(bitmap)
+                "ML Kit" -> processMlKit(bitmap)
+                else -> {}
             }
+        }
+    }
+
+    private fun processMlKit(bitmap: Bitmap) {
+        mlKitSegmenter?.process(InputImage.fromBitmap(bitmap, 0))?.addOnSuccessListener { result ->
+            val maskBuffer = result.buffer; maskBuffer.rewind()
+            val width = result.width; val height = result.height
+            val pixels = ByteArray(width * height)
+            for (i in 0 until width * height) {
+                if (maskBuffer.hasRemaining()) {
+                    pixels[i] = (if (maskBuffer.float > 0.45f) 255 else 0).toByte()
+                }
+            }
+            val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
+            maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
+            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(maskBitmap, bitmap, startColor, endColor) }
+        }
     }
 
     private fun processYolact(bitmap: Bitmap) {
         val interpreter = yolactInterpreter ?: return
-        val outBoxes = yolactOutputBoxes ?: return
-        val outScores = yolactOutputScores ?: return
-        val outCoeffs = yolactOutputCoeffs ?: return
-        val outProtos = yolactOutputProtos ?: return
-
-        val startTime = System.currentTimeMillis()
-
         val tImage = yolactTensorImage ?: return
         tImage.load(bitmap)
-        val processedImage = yolactImageProcessor?.process(tImage) ?: return
-        val inputBuffer = processedImage.buffer
-
-        outBoxes.clear(); outScores.clear(); outCoeffs.clear(); outProtos.clear()
-
+        val inputBuffer = yolactImageProcessor?.process(tImage)?.buffer ?: return
         val outputs = mutableMapOf<Int, Any>()
-        for (i in 0 until interpreter.outputTensorCount) {
-            val totalSize = interpreter.getOutputTensor(i).shape().fold(1) { acc, size -> acc * size }
-            when (totalSize * 4) {
-                outBoxes.capacity() -> outputs[i] = outBoxes
-                outScores.capacity() -> outputs[i] = outScores
-                outCoeffs.capacity() -> outputs[i] = outCoeffs
-                outProtos.capacity() -> outputs[i] = outProtos
-            }
-        }
-
-        try {
-            interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
-        } catch (e: Exception) {
-            return
-        }
-
-        outScores.rewind()
-        val scoresFloatBuffer = outScores.asFloatBuffer()
-        val numDetections = minOf(19248, scoresFloatBuffer.limit() / 81)
-        val scoresArray = reusableScoresArray ?: FloatArray(numDetections * 81)
-        scoresFloatBuffer.get(scoresArray, 0, numDetections * 81)
-
-        var bestIdx = -1
-        var maxScore = 0f
-        for (i in 0 until numDetections) {
-            val score = scoresArray[i * 81 + 1]
-            if (score > maxScore) { maxScore = score; bestIdx = i }
-        }
-
+        yolactOutputBoxes?.clear(); yolactOutputScores?.clear(); yolactOutputCoeffs?.clear(); yolactOutputProtos?.clear()
+        outputs[0] = yolactOutputBoxes!!; outputs[1] = yolactOutputScores!!
+        outputs[2] = yolactOutputCoeffs!!; outputs[3] = yolactOutputProtos!!
+        try { interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs) } catch (e: Exception) { return }
+        yolactOutputScores?.rewind(); val scoresArray = reusableScoresArray ?: return
+        yolactOutputScores?.asFloatBuffer()?.get(scoresArray)
+        var bestIdx = -1; var maxScore = 0f
+        for (i in 0 until 19248) { val score = scoresArray[i * 81 + 1]; if (score > maxScore) { maxScore = score; bestIdx = i } }
         if (bestIdx != -1 && maxScore > 0.15f) {
-            val coeffs = FloatArray(32)
-            outCoeffs.rewind()
-            val coeffsFloatBuffer = outCoeffs.asFloatBuffer()
-            coeffsFloatBuffer.position(bestIdx * 32)
-            coeffsFloatBuffer.get(coeffs)
-
-            val maskBitmap = generateYolactMask(coeffs, outProtos)
-            val finalMask = Bitmap.createScaledBitmap(maskBitmap, bitmap.width, bitmap.height, true)
-
-            activity?.runOnUiThread {
-                _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor)
-            }
-            if (Random().nextInt(100) < 5) {
-                val totalTime = System.currentTimeMillis() - startTime
-                addLog("YOLACT ($actualDelegate): Score=${String.format("%.2f", maxScore)}, Time=${totalTime}ms")
-            }
+            val coeffs = FloatArray(32); yolactOutputCoeffs?.rewind()
+            val fb = yolactOutputCoeffs?.asFloatBuffer(); fb?.position(bestIdx * 32); fb?.get(coeffs)
+            val mask = generateYolactMask(coeffs, yolactOutputProtos!!)
+            val finalMask = Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true)
+            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor) }
         }
     }
 
     private fun generateYolactMask(coeffs: FloatArray, protos: ByteBuffer): Bitmap {
         val width = 138; val height = 138
-        val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
-        val pixels = reusableMaskPixels ?: return maskBitmap
-        val protosArray = reusableProtosArray ?: return maskBitmap
-
-        protos.rewind()
-        protos.asFloatBuffer().get(protosArray)
-
-        pixels.rewind()
+        val pixels = reusableMaskPixels!!; pixels.clear()
+        val protosArray = reusableProtosArray ?: return Bitmap.createBitmap(1, 1, Bitmap.Config.ALPHA_8)
+        protos.rewind(); protos.asFloatBuffer().get(protosArray)
         for (y in 0 until height) {
             for (x in 0 until width) {
-                var sum = 0f
-                val offset = (y * width + x) * 32
+                var sum = 0f; val offset = (y * width + x) * 32
                 for (k in 0 until 32) sum += coeffs[k] * protosArray[offset + k]
-                // Decreased mask threshold to expand masking area (from 1.0f to 0.5f)
-                pixels.put(if (sum > 0.5f) 255.toByte() else 0.toByte())
+                pixels.put((if (sum > 0.5f) 255 else 0).toByte())
             }
         }
+        val mask = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
         pixels.rewind()
-        maskBitmap.copyPixelsFromBuffer(pixels)
-        return maskBitmap
+        mask.copyPixelsFromBuffer(pixels); return mask
     }
 
     private fun processModNet(bitmap: Bitmap) {
         val interpreter = modnetInterpreter ?: return
-        val outBuffer = modnetOutputBuffer ?: return
-        val startTime = System.currentTimeMillis()
-
         val tImage = modnetTensorImage ?: return
         tImage.load(bitmap)
-        val processedImage = modnetImageProcessor?.process(tImage) ?: return
-        val inputBuffer = processedImage.buffer
-
-        outBuffer.clear()
-        try {
-            interpreter.run(inputBuffer, outBuffer)
-        } catch (e: Exception) {
-            Log.e(TAG, "MODNet Inference error", e)
-            return
-        }
-
-        outBuffer.rewind()
-        val outFloatBuffer = outBuffer.asFloatBuffer()
-        val pixels = reusableMaskPixels ?: return
-        pixels.rewind()
-
-        // Decreased threshold to expand masking area (from 0.8f to 0.4f)
-        val threshold = 0.4f
+        val inputBuffer = modnetImageProcessor?.process(tImage)?.buffer ?: return
+        modnetOutputBuffer?.clear()
+        try { interpreter.run(inputBuffer, modnetOutputBuffer) } catch (e: Exception) { return }
+        modnetOutputBuffer?.rewind(); val fb = modnetOutputBuffer?.asFloatBuffer() ?: return
+        val pixels = reusableMaskPixels!!; pixels.clear()
         for (i in 0 until (256 * 256)) {
-            val confidence = outFloatBuffer.get()
-            val alpha = if (confidence > threshold) 255 else 0
-            pixels.put(alpha.toByte())
+            if (fb.hasRemaining()) {
+                pixels.put((if (fb.get() > 0.4f) 255 else 0).toByte())
+            }
         }
+        val mask = Bitmap.createBitmap(256, 256, Bitmap.Config.ALPHA_8)
         pixels.rewind()
-
-        val maskBitmap = Bitmap.createBitmap(256, 256, Bitmap.Config.ALPHA_8)
-        maskBitmap.copyPixelsFromBuffer(pixels)
-        val finalMask = Bitmap.createScaledBitmap(maskBitmap, bitmap.width, bitmap.height, true)
-
-        activity?.runOnUiThread {
-            _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor)
-        }
-
-        if (Random().nextInt(100) < 5) {
-            val totalTime = System.currentTimeMillis() - startTime
-            addLog("MODNet ($actualDelegate): Time=${totalTime}ms")
-        }
+        mask.copyPixelsFromBuffer(pixels)
+        val finalMask = Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true)
+        activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor) }
     }
 
     private fun processImageProxy(imageProxy: ImageProxy): Bitmap? {
         return try {
-            val buffer = imageProxy.planes[0].buffer
-            buffer.rewind()
+            val buffer = imageProxy.planes[0].buffer; buffer.rewind()
             val bitmap = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
             bitmap.copyPixelsFromBuffer(buffer)
-            val matrix = Matrix().apply {
-                postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
-                postScale(-1f, 1f)
-            }
+            val matrix = Matrix().apply { postRotate(imageProxy.imageInfo.rotationDegrees.toFloat()); postScale(-1f, 1f) }
             Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) { null }
     }
 
     private fun addLog(message: String) {
-        activity?.runOnUiThread {
-            _binding?.let { b ->
-                val timestamp = sdf.format(Date())
-                val currentLog = b.eventLog.text.toString()
-                b.eventLog.text = "[$timestamp] $message\n${currentLog.take(1000)}"
-            }
-        }
+        activity?.runOnUiThread { _binding?.let { b ->
+            val timestamp = sdf.format(Date())
+            b.eventLog.text = "[$timestamp] $message\n${b.eventLog.text.toString().take(1000)}"
+        } }
     }
 
     private fun allPermissionsGranted() = ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
     override fun onPause() {
         super.onPause()
-        sharedSegmenterExecutor.execute {
-            synchronized(segmenterLock) {
-                closeCurrentSegmenter()
-            }
-        }
+        sharedSegmenterExecutor.execute { synchronized(segmenterLock) { closeCurrentSegmenter() } }
+        stopRtsp()
     }
 
     override fun onDestroyView() {
         super.onDestroyView()
-        cameraExecutor?.shutdown()
-        _binding = null
+        cameraExecutor?.shutdown(); _binding = null
     }
 }
