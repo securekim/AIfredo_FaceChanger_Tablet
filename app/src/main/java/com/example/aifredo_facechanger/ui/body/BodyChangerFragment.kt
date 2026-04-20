@@ -224,7 +224,15 @@ class BodyChangerFragment : Fragment() {
             try {
                 val width = mask.width
                 val height = mask.height
-                val byteBuffer = com.google.mediapipe.framework.image.ByteBufferExtractor.extract(mask)
+                
+                // ByteBuffer 추출 시 non-contiguous 에러 발생 가능성에 대비하여 예외 처리를 추가합니다.
+                val byteBuffer = try {
+                    com.google.mediapipe.framework.image.ByteBufferExtractor.extract(mask)
+                } catch (e: Exception) {
+                    Log.e(TAG, "MediaPipe mask extraction failed: ${e.message}")
+                    return
+                }
+                
                 byteBuffer.rewind()
                 val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
                 val pixels = ByteArray(width * height)
@@ -352,6 +360,11 @@ class BodyChangerFragment : Fragment() {
 
         addLog("Connecting RTSP: $rtspUrl")
         exoPlayer = ExoPlayer.Builder(requireContext()).build().apply {
+            // RTSP 스트림의 오디오 타임스탬프 불연속으로 인한 AudioSink 에러를 방지하기 위해 오디오 트랙을 비활성화합니다.
+            trackSelectionParameters = trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_AUDIO, true)
+                .build()
+
             setMediaSource(RtspMediaSource.Factory().createMediaSource(MediaItem.fromUri(rtspUrl)))
             prepare(); playWhenReady = true
         }
@@ -362,8 +375,23 @@ class BodyChangerFragment : Fragment() {
     private fun extractFrameFromPlayer() {
         val b = _binding ?: return
         val textureView = b.playerView.videoSurfaceView as? TextureView ?: return
-        val bitmap = textureView.getBitmap() ?: return
+        val originalBitmap = textureView.getBitmap() ?: return
+
+        // MediaPipe Pose의 세그멘테이션 마스크 에러를 방지하기 위해 입력 해상도를 표준 크기(가로 640)로 조정하고 메모리를 정규화합니다.
+        val targetWidth = 640
+        val targetHeight = (originalBitmap.height * (targetWidth.toFloat() / originalBitmap.width)).toInt()
+        val bitmap = try {
+            Bitmap.createScaledBitmap(originalBitmap, targetWidth, targetHeight, true)
+        } catch (e: Exception) {
+            originalBitmap
+        }
+        
         processFrameBitmap(bitmap)
+        
+        // 원본 비트맵이 리사이징되어 새로운 비트맵이 생성된 경우에만 원본을 recycle 합니다.
+        if (bitmap != originalBitmap) {
+            originalBitmap.recycle()
+        }
     }
 
     private fun stopCamera() {

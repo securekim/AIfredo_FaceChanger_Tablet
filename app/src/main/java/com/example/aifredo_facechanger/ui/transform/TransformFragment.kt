@@ -382,6 +382,11 @@ class TransformFragment : Fragment() {
         addLog("Connecting RTSP: $rtspUrl")
         
         exoPlayer = ExoPlayer.Builder(requireContext()).build().apply {
+            // RTSP 스트림의 오디오 타임스탬프 불연속으로 인한 AudioSink 에러를 방지하기 위해 오디오 트랙을 비활성화합니다.
+            trackSelectionParameters = trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_AUDIO, true)
+                .build()
+
             addListener(object : Player.Listener {
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                     val message = error.cause?.message ?: error.message
