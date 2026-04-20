@@ -4,16 +4,13 @@ import android.content.Context
 import android.os.Bundle
 import android.view.Menu
 import android.view.MenuItem
-import com.google.android.material.snackbar.Snackbar
-import com.google.android.material.navigation.NavigationView
+import androidx.appcompat.app.AppCompatActivity
 import androidx.navigation.findNavController
 import androidx.navigation.fragment.NavHostFragment
-import androidx.navigation.ui.AppBarConfiguration
-import androidx.navigation.ui.navigateUp
-import androidx.navigation.ui.setupActionBarWithNavController
-import androidx.navigation.ui.setupWithNavController
-import androidx.appcompat.app.AppCompatActivity
+import androidx.navigation.navOptions
+import androidx.navigation.ui.*
 import com.example.aifredo_facechanger.databinding.ActivityMainBinding
+import com.google.android.material.navigation.NavigationView
 
 class MainActivity : AppCompatActivity() {
 
@@ -27,33 +24,24 @@ class MainActivity : AppCompatActivity() {
         setSupportActionBar(binding.appBarMain.toolbar)
 
         val navHostFragment =
-            (supportFragmentManager.findFragmentById(R.id.nav_host_fragment_content_main) as NavHostFragment?)!!
+            supportFragmentManager.findFragmentById(R.id.nav_host_fragment_content_main) as NavHostFragment
         val navController = navHostFragment.navController
 
-        binding.navView?.let {
-            appBarConfiguration = AppBarConfiguration(
-                setOf(
-                    R.id.nav_transform, R.id.nav_body_changer, R.id.nav_reflow, R.id.nav_slideshow, R.id.nav_voice, R.id.nav_settings
-                ),
-                binding.drawerLayout
-            )
-            setupActionBarWithNavController(navController, appBarConfiguration)
-            it.setupWithNavController(navController)
-        }
+        // 상단 바에서 햄버거 메뉴가 나타날 최상위 목적지들 정의
+        val topLevelDestinations = setOf(
+            R.id.nav_transform, R.id.nav_body_changer, R.id.nav_reflow, 
+            R.id.nav_slideshow, R.id.nav_voice, R.id.nav_settings
+        )
+        
+        appBarConfiguration = AppBarConfiguration(topLevelDestinations, binding.drawerLayout)
+        setupActionBarWithNavController(navController, appBarConfiguration)
 
-        binding.appBarMain.contentMain.bottomNavView?.let {
-            // If both drawer and bottom nav are used, we should ideally merge the top-level destinations
-            val topLevelDestinations = setOf(
-                R.id.nav_transform, R.id.nav_body_changer, R.id.nav_reflow, R.id.nav_slideshow, R.id.nav_voice, R.id.nav_settings
-            )
-            appBarConfiguration = AppBarConfiguration(topLevelDestinations, binding.drawerLayout)
-            setupActionBarWithNavController(navController, appBarConfiguration)
-            it.setupWithNavController(navController)
-        }
+        // Drawer 및 Bottom Navigation 연결 (ID가 nav graph와 일치해야 함)
+        binding.navView?.setupWithNavController(navController)
+        binding.appBarMain.contentMain.bottomNavView?.setupWithNavController(navController)
 
-        // Restore last menu
+        // 마지막으로 사용했던 메뉴 복원 로직 개선
         val sharedPref = getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE)
-        // Using resource name instead of ID for persistence to avoid issues with shifting resource IDs between builds
         val lastNavName = sharedPref.getString("last_nav_name", null)
         val lastNavId = if (lastNavName != null) {
             resources.getIdentifier(lastNavName, "id", packageName)
@@ -61,16 +49,21 @@ class MainActivity : AppCompatActivity() {
             sharedPref.getInt("last_nav_id", R.id.nav_transform)
         }
         
-        // Use post to ensure navigation happens after setup
         binding.root.post {
             if (navController.currentDestination?.id != lastNavId && lastNavId != 0) {
                 try {
-                    // Check if the destination exists in the navigation graph before attempting to navigate
                     if (navController.graph.findNode(lastNavId) != null) {
-                        navController.navigate(lastNavId)
+                        // popUpTo를 사용하여 백스택이 쌓이는 것을 방지
+                        navController.navigate(lastNavId, null, navOptions {
+                            popUpTo(navController.graph.startDestinationId) {
+                                saveState = true
+                            }
+                            launchSingleTop = true
+                            restoreState = true
+                        })
                     }
                 } catch (e: Exception) {
-                    // If navigation fails (e.g. invalid destination for current state), stay at current/start
+                    // 목적지가 유효하지 않을 경우 무시
                 }
             }
         }
@@ -89,22 +82,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        val result = super.onCreateOptionsMenu(menu)
-        val navView: NavigationView? = findViewById(R.id.nav_view)
-        if (navView == null) {
+        // Drawer가 없는 레이아웃 구성일 때만 overflow 메뉴 인플레이트
+        if (binding.navView == null) {
             menuInflater.inflate(R.menu.overflow, menu)
         }
-        return result
+        return true
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        when (item.itemId) {
-            R.id.nav_settings -> {
-                val navController = findNavController(R.id.nav_host_fragment_content_main)
-                navController.navigate(R.id.nav_settings)
-            }
-        }
-        return super.onOptionsItemSelected(item)
+        val navController = findNavController(R.id.nav_host_fragment_content_main)
+        // onNavDestinationSelected를 사용하여 메뉴 ID와 목적지 ID가 같으면 자동 이동
+        return item.onNavDestinationSelected(navController) || super.onOptionsItemSelected(item)
     }
 
     override fun onSupportNavigateUp(): Boolean {

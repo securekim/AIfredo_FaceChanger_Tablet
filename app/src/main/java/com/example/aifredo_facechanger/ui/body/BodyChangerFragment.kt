@@ -106,7 +106,7 @@ class BodyChangerFragment : Fragment() {
             if (isRtspMode && exoPlayer?.isPlaying == true) {
                 extractFrameFromPlayer()
             }
-            rtspFrameHandler.postDelayed(this, 33) // 프레임 추출 간격 동기화 (33ms)
+            rtspFrameHandler.postDelayed(this, 33)
         }
     }
 
@@ -365,7 +365,6 @@ class BodyChangerFragment : Fragment() {
 
         addLog("Connecting RTSP: $rtspUrl")
 
-        // 지연시간 최적화
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(500, 1000, 250, 500)
             .build()
@@ -387,7 +386,7 @@ class BodyChangerFragment : Fragment() {
                     addLog("Playback Error: ${error.message}")
                 }
                 override fun onPlaybackStateChanged(playbackState: Int) {
-                    if (playbackState == Player.STATE_READY) addLog("RTSP Connected")
+                    if (playbackState == Player.STATE_READY && isRtspMode) addLog("RTSP Connected")
                 }
             })
 
@@ -405,7 +404,6 @@ class BodyChangerFragment : Fragment() {
         val textureView = b.playerView.videoSurfaceView as? TextureView ?: return
         val originalBitmap = textureView.getBitmap() ?: return
 
-        // UI 스레드 부하를 줄이기 위해 비트맵 처리 및 추론을 백그라운드 스레드로 이동
         cameraExecutor?.execute {
             val targetWidth = 640
             val targetHeight = (originalBitmap.height * (targetWidth.toFloat() / originalBitmap.width)).toInt()
@@ -419,6 +417,19 @@ class BodyChangerFragment : Fragment() {
             
             if (bitmap != originalBitmap) {
                 originalBitmap.recycle()
+            }
+            // Always recycle the original bitmap from textureView
+            // Wait, if bitmap == originalBitmap, it's recycled above. 
+            // If bitmap != originalBitmap, bitmap is a scaled version, and originalBitmap is NOT recycled in the block above.
+            // Let's fix this properly:
+            if (bitmap != originalBitmap) {
+                originalBitmap.recycle()
+            }
+            // But who recycles 'bitmap'? processFrameBitmap should handle it or it should be handled here.
+            // In MediaPipe detectAsync, we can't recycle immediately.
+            // For others, we can.
+            if (selectedModel != "MediaPipe Pose") {
+                bitmap.recycle()
             }
         }
     }
@@ -435,7 +446,12 @@ class BodyChangerFragment : Fragment() {
 
     private fun processFrame(imageProxy: ImageProxy) {
         val bitmap = processImageProxy(imageProxy)
-        if (bitmap != null) processFrameBitmap(bitmap)
+        if (bitmap != null) {
+            processFrameBitmap(bitmap)
+            if (selectedModel != "MediaPipe Pose") {
+                bitmap.recycle()
+            }
+        }
         imageProxy.close()
     }
 
