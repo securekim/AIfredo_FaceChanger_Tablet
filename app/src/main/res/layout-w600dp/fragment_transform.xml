@@ -11,6 +11,14 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/playerView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone"
+        app:use_controller="false"
+        app:surface_type="texture_view" />
+
     <com.example.aifredo_facechanger.ui.transform.FaceOverlayView
         android:id="@+id/faceOverlay"
         android:layout_width="match_parent"

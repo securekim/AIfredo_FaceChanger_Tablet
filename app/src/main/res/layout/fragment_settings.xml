@@ -275,6 +275,34 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="24dp"
+                    android:text="Webcam Stream Quality"
+                    android:textSize="18sp" />
+
+                <RadioGroup
+                    android:id="@+id/radioGroup_rtsp_quality"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginTop="8dp">
+
+                    <RadioButton
+                        android:id="@+id/radio_quality_high"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="High Quality (stream1)"
+                        android:layout_marginEnd="16dp" />
+
+                    <RadioButton
+                        android:id="@+id/radio_quality_low"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Low Quality (stream2)" />
+                </RadioGroup>
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="24dp"
                     android:text="@string/settings_body_gradient_start_color"
                     android:textSize="18sp" />
 
@@ -351,20 +379,20 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="@string/settings_rtsp_ip" />
+                        android:text="RTSP IP" />
 
                     <EditText
                         android:id="@+id/edit_rtsp_ip"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:hint="192.168.1.10:554/live"
+                        android:hint="192.168.0.21"
                         android:inputType="text" />
 
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
-                        android:text="@string/settings_rtsp_id" />
+                        android:text="RTSP ID" />
 
                     <EditText
                         android:id="@+id/edit_rtsp_id"
@@ -377,7 +405,7 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
-                        android:text="@string/settings_rtsp_pw" />
+                        android:text="RTSP PW" />
 
                     <EditText
                         android:id="@+id/edit_rtsp_pw"

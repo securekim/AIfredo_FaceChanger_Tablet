@@ -28,7 +28,6 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.Segmentation
 import com.google.mlkit.vision.segmentation.Segmenter
 import com.google.mlkit.vision.segmentation.selfie.SelfieSegmenterOptions
-import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
@@ -50,6 +49,7 @@ import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ops.ResizeOp
 import org.tensorflow.lite.support.common.ops.NormalizeOp
 import org.tensorflow.lite.DataType
+import com.google.mediapipe.framework.image.BitmapImageBuilder
 
 class BodyChangerFragment : Fragment() {
 
@@ -87,6 +87,7 @@ class BodyChangerFragment : Fragment() {
     private var selectedModel: String = "MediaPipe Pose"
     private var selectedDelegate: String = "CPU"
     private var actualDelegate: String = "CPU"
+    private var rtspQuality: String = "High"
 
     private val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     private val TAG = "BodyChanger"
@@ -148,6 +149,7 @@ class BodyChangerFragment : Fragment() {
         val startColorStr = sharedPref.getString("body_start_color", "#FF0000") ?: "#FF0000"
         val endColorStr = sharedPref.getString("body_end_color", "#0000FF") ?: "#0000FF"
         isRtspMode = sharedPref.getString("cam_source", "Embedded") == "RTSP"
+        rtspQuality = sharedPref.getString("rtsp_quality", "High") ?: "High"
 
         try {
             startColor = Color.parseColor(startColorStr)
@@ -326,11 +328,28 @@ class BodyChangerFragment : Fragment() {
         _binding?.viewFinder?.visibility = View.GONE
         _binding?.playerView?.visibility = View.VISIBLE
         val sharedPref = activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE) ?: return
-        val ip = sharedPref.getString("rtsp_ip", "") ?: ""
+        val ip = (sharedPref.getString("rtsp_ip", "") ?: "").trim().removePrefix("rtsp://")
         val id = sharedPref.getString("rtsp_id", "") ?: ""
         val pw = sharedPref.getString("rtsp_pw", "") ?: ""
+        
         if (ip.isEmpty()) { addLog("RTSP IP is empty."); return }
-        val rtspUrl = if (id.isNotEmpty() && pw.isNotEmpty()) "rtsp://$id:$pw@$ip" else "rtsp://$ip"
+
+        val streamPath = if (rtspQuality == "Low") "stream2" else "stream1"
+        
+        val rtspUrl = buildString {
+            append("rtsp://")
+            if (id.isNotEmpty() && pw.isNotEmpty()) {
+                append("$id:$pw@")
+            }
+            append(ip)
+            if (!ip.contains("/")) {
+                if (!ip.contains(":")) {
+                    append(":554")
+                }
+                append("/$streamPath")
+            }
+        }
+
         addLog("Connecting RTSP: $rtspUrl")
         exoPlayer = ExoPlayer.Builder(requireContext()).build().apply {
             setMediaSource(RtspMediaSource.Factory().createMediaSource(MediaItem.fromUri(rtspUrl)))

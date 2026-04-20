@@ -130,6 +130,13 @@ class SettingsFragment : Fragment() {
             sharedPref.edit().putString("body_delegate", selected).apply()
         }
 
+        val rtspQuality = sharedPref.getString("rtsp_quality", "High")
+        if (rtspQuality == "Low") binding.radioQualityLow.isChecked = true else binding.radioQualityHigh.isChecked = true
+        binding.radioGroupRtspQuality.setOnCheckedChangeListener { _, checkedId ->
+            val selected = if (checkedId == R.id.radio_quality_low) "Low" else "High"
+            sharedPref.edit().putString("rtsp_quality", selected).apply()
+        }
+
         binding.editBodyStartColor.setText(sharedPref.getString("body_start_color", "#FF0000"))
         binding.editBodyEndColor.setText(sharedPref.getString("body_end_color", "#0000FF"))
 
