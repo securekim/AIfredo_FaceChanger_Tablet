@@ -21,9 +21,9 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
-import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import com.example.aifredo_facechanger.databinding.FragmentTransformBinding
 import com.google.mediapipe.framework.image.BitmapImageBuilder
@@ -40,7 +40,6 @@ import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import org.tensorflow.lite.support.common.FileUtil
 import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
@@ -130,10 +129,15 @@ class TransformFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        val oldRtspMode = isRtspMode
         loadPreferences()
-        if (oldRtspMode != isRtspMode) startStream()
+        startStream()
         setupModels()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        stopRtsp()
+        stopCamera()
     }
 
     private fun loadPreferences() {
@@ -380,8 +384,27 @@ class TransformFragment : Fragment() {
         }
 
         addLog("Connecting RTSP: $rtspUrl")
+
+        // 지연시간 최적화: 버퍼링 설정을 최소화합니다.
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(
+                500,  // minBufferMs
+                1000, // maxBufferMs
+                250,  // bufferForPlaybackMs
+                500   // bufferForPlaybackAfterRebufferMs
+            )
+            .build()
         
-        exoPlayer = ExoPlayer.Builder(requireContext()).build().apply {
+        val mediaItem = MediaItem.Builder()
+            .setUri(rtspUrl)
+            .setLiveConfiguration(MediaItem.LiveConfiguration.Builder()
+                .setTargetOffsetMs(500)
+                .build())
+            .build()
+
+        exoPlayer = ExoPlayer.Builder(requireContext())
+            .setLoadControl(loadControl)
+            .build().apply {
             // RTSP 스트림의 오디오 타임스탬프 불연속으로 인한 AudioSink 에러를 방지하기 위해 오디오 트랙을 비활성화합니다.
             trackSelectionParameters = trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_AUDIO, true)
@@ -398,8 +421,9 @@ class TransformFragment : Fragment() {
             })
             
             val mediaSource = RtspMediaSource.Factory()
-                .setForceUseRtpTcp(true)
-                .createMediaSource(MediaItem.fromUri(rtspUrl))
+                .setForceUseRtpTcp(false) // 지연시간 단축을 위해 UDP 우선 사용
+                .setTimeoutMs(4000)
+                .createMediaSource(mediaItem)
             
             setMediaSource(mediaSource)
             prepare()

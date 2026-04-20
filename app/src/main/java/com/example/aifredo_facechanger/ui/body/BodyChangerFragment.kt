@@ -20,8 +20,10 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import com.example.aifredo_facechanger.databinding.FragmentBodyChangerBinding
 import com.google.mlkit.vision.common.InputImage
@@ -104,7 +106,7 @@ class BodyChangerFragment : Fragment() {
             if (isRtspMode && exoPlayer?.isPlaying == true) {
                 extractFrameFromPlayer()
             }
-            rtspFrameHandler.postDelayed(this, 40)
+            rtspFrameHandler.postDelayed(this, 33) // 프레임 추출 간격 동기화 (33ms)
         }
     }
 
@@ -132,13 +134,16 @@ class BodyChangerFragment : Fragment() {
 
     override fun onResume() {
         super.onResume()
-        val oldRtspMode = isRtspMode
         loadSettings()
-        
-        if (oldRtspMode != isRtspMode) {
-            startStream()
-        }
+        startStream()
         setupSegmenter()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        stopRtsp()
+        stopCamera()
+        sharedSegmenterExecutor.execute { synchronized(segmenterLock) { closeCurrentSegmenter() } }
     }
 
     private fun loadSettings() {
@@ -225,7 +230,6 @@ class BodyChangerFragment : Fragment() {
                 val width = mask.width
                 val height = mask.height
                 
-                // ByteBuffer 추출 시 non-contiguous 에러 발생 가능성에 대비하여 예외 처리를 추가합니다.
                 val byteBuffer = try {
                     com.google.mediapipe.framework.image.ByteBufferExtractor.extract(mask)
                 } catch (e: Exception) {
@@ -332,6 +336,7 @@ class BodyChangerFragment : Fragment() {
 
     @OptIn(UnstableApi::class)
     private fun startRtsp() {
+        stopRtsp()
         stopCamera()
         _binding?.viewFinder?.visibility = View.GONE
         _binding?.playerView?.visibility = View.VISIBLE
@@ -359,13 +364,36 @@ class BodyChangerFragment : Fragment() {
         }
 
         addLog("Connecting RTSP: $rtspUrl")
-        exoPlayer = ExoPlayer.Builder(requireContext()).build().apply {
-            // RTSP 스트림의 오디오 타임스탬프 불연속으로 인한 AudioSink 에러를 방지하기 위해 오디오 트랙을 비활성화합니다.
+
+        // 지연시간 최적화
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(500, 1000, 250, 500)
+            .build()
+        
+        val mediaItem = MediaItem.Builder()
+            .setUri(rtspUrl)
+            .setLiveConfiguration(MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(500).build())
+            .build()
+
+        exoPlayer = ExoPlayer.Builder(requireContext())
+            .setLoadControl(loadControl)
+            .build().apply {
             trackSelectionParameters = trackSelectionParameters.buildUpon()
                 .setTrackTypeDisabled(androidx.media3.common.C.TRACK_TYPE_AUDIO, true)
                 .build()
 
-            setMediaSource(RtspMediaSource.Factory().createMediaSource(MediaItem.fromUri(rtspUrl)))
+            addListener(object : Player.Listener {
+                override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                    addLog("Playback Error: ${error.message}")
+                }
+                override fun onPlaybackStateChanged(playbackState: Int) {
+                    if (playbackState == Player.STATE_READY) addLog("RTSP Connected")
+                }
+            })
+
+            setMediaSource(RtspMediaSource.Factory()
+                .setForceUseRtpTcp(false)
+                .createMediaSource(mediaItem))
             prepare(); playWhenReady = true
         }
         binding.playerView.player = exoPlayer
@@ -377,20 +405,21 @@ class BodyChangerFragment : Fragment() {
         val textureView = b.playerView.videoSurfaceView as? TextureView ?: return
         val originalBitmap = textureView.getBitmap() ?: return
 
-        // MediaPipe Pose의 세그멘테이션 마스크 에러를 방지하기 위해 입력 해상도를 표준 크기(가로 640)로 조정하고 메모리를 정규화합니다.
-        val targetWidth = 640
-        val targetHeight = (originalBitmap.height * (targetWidth.toFloat() / originalBitmap.width)).toInt()
-        val bitmap = try {
-            Bitmap.createScaledBitmap(originalBitmap, targetWidth, targetHeight, true)
-        } catch (e: Exception) {
-            originalBitmap
-        }
-        
-        processFrameBitmap(bitmap)
-        
-        // 원본 비트맵이 리사이징되어 새로운 비트맵이 생성된 경우에만 원본을 recycle 합니다.
-        if (bitmap != originalBitmap) {
-            originalBitmap.recycle()
+        // UI 스레드 부하를 줄이기 위해 비트맵 처리 및 추론을 백그라운드 스레드로 이동
+        cameraExecutor?.execute {
+            val targetWidth = 640
+            val targetHeight = (originalBitmap.height * (targetWidth.toFloat() / originalBitmap.width)).toInt()
+            val bitmap = try {
+                Bitmap.createScaledBitmap(originalBitmap, targetWidth, targetHeight, true)
+            } catch (e: Exception) {
+                originalBitmap
+            }
+            
+            processFrameBitmap(bitmap)
+            
+            if (bitmap != originalBitmap) {
+                originalBitmap.recycle()
+            }
         }
     }
 
@@ -517,12 +546,6 @@ class BodyChangerFragment : Fragment() {
     }
 
     private fun allPermissionsGranted() = ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-
-    override fun onPause() {
-        super.onPause()
-        sharedSegmenterExecutor.execute { synchronized(segmenterLock) { closeCurrentSegmenter() } }
-        stopRtsp()
-    }
 
     override fun onDestroyView() {
         super.onDestroyView()
