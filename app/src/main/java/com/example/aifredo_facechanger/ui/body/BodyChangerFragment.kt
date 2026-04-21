@@ -212,9 +212,9 @@ class BodyChangerFragment : Fragment() {
                 .setBaseOptions(baseOptionsBuilder.build())
                 .setRunningMode(RunningMode.LIVE_STREAM)
                 .setOutputSegmentationMasks(true)
-                .setMinPoseDetectionConfidence(0.2f)  // 초기 탐지 기준 대폭 하향 (기본 0.5)
-                .setMinPosePresenceConfidence(0.4f)   // 포즈 존재 확인 기준 하향 (기본 0.5) - 사람이 흐릿해도 추적을 쉽게 포기하지 말 것
-                .setMinTrackingConfidence(0.4f)       // 추적 유지 기준 하향 (기본 0.5) - 관절이 부정확해도 박스를 유지할 것
+                .setMinPoseDetectionConfidence(0.2f)
+                .setMinPosePresenceConfidence(0.4f)
+                .setMinTrackingConfidence(0.4f)
                 .setResultListener { result, image ->
                     processMediaPipePoseResult(result, image.width, image.height)
                 }
@@ -254,8 +254,15 @@ class BodyChangerFragment : Fragment() {
                     byteBuffer.get(pixels)
                 }
                 maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
-                val finalMask = Bitmap.createScaledBitmap(maskBitmap, originalWidth, originalHeight, true)
-                maskBitmap.recycle()
+                
+                val finalMask = try {
+                    Bitmap.createScaledBitmap(maskBitmap, originalWidth, originalHeight, true)
+                } catch (e: Exception) { maskBitmap }
+                
+                if (finalMask != maskBitmap) {
+                    maskBitmap.recycle()
+                }
+                
                 activity?.runOnUiThread { _binding?.bodyOverlay?.updateMaskOnly(finalMask, startColor, endColor, isMirrorMode) }
             } catch (e: Exception) {}
         }
@@ -407,7 +414,7 @@ class BodyChangerFragment : Fragment() {
     private fun extractFrameFromPlayer() {
         val b = _binding ?: return
         val textureView = b.playerView.videoSurfaceView as? TextureView ?: return
-        val originalBitmap = textureView.getBitmap() ?: return
+        val originalBitmap = try { textureView.getBitmap() } catch (e: Exception) { null } ?: return
 
         cameraExecutor?.execute {
             val targetWidth = 640
@@ -418,24 +425,11 @@ class BodyChangerFragment : Fragment() {
                 originalBitmap
             }
             
-            processFrameBitmap(bitmap)
+            if (bitmap != originalBitmap) {
+                originalBitmap.recycle()
+            }
             
-            if (bitmap != originalBitmap) {
-                originalBitmap.recycle()
-            }
-            // Always recycle the original bitmap from textureView
-            // Wait, if bitmap == originalBitmap, it's recycled above. 
-            // If bitmap != originalBitmap, bitmap is a scaled version, and originalBitmap is NOT recycled in the block above.
-            // Let's fix this properly:
-            if (bitmap != originalBitmap) {
-                originalBitmap.recycle()
-            }
-            // But who recycles 'bitmap'? processFrameBitmap should handle it or it should be handled here.
-            // In MediaPipe detectAsync, we can't recycle immediately.
-            // For others, we can.
-            if (selectedModel != "MediaPipe Pose") {
-                bitmap.recycle()
-            }
+            processFrameBitmap(bitmap)
         }
     }
 
@@ -453,9 +447,6 @@ class BodyChangerFragment : Fragment() {
         val bitmap = processImageProxy(imageProxy)
         if (bitmap != null) {
             processFrameBitmap(bitmap)
-            if (selectedModel != "MediaPipe Pose") {
-                bitmap.recycle()
-            }
         }
         imageProxy.close()
     }
@@ -463,29 +454,55 @@ class BodyChangerFragment : Fragment() {
     private fun processFrameBitmap(bitmap: Bitmap) {
         synchronized(segmenterLock) {
             when (selectedModel) {
-                "MediaPipe Pose" -> poseLandmarker?.detectAsync(BitmapImageBuilder(bitmap).build(), System.currentTimeMillis())
-                "YOLACT" -> processYolact(bitmap)
-                "MODNet" -> processModNet(bitmap)
-                "ML Kit" -> processMlKit(bitmap)
-                else -> {}
+                "MediaPipe Pose" -> {
+                    poseLandmarker?.detectAsync(BitmapImageBuilder(bitmap).build(), System.currentTimeMillis())
+                    // MediaPipe Pose detects asynchronously, and it's safer not to recycle the input bitmap immediately.
+                    // To avoid OOM, consider a pooling strategy or careful lifecycle management.
+                }
+                "YOLACT" -> {
+                    processYolact(bitmap)
+                    bitmap.recycle()
+                }
+                "MODNet" -> {
+                    processModNet(bitmap)
+                    bitmap.recycle()
+                }
+                "ML Kit" -> {
+                    processMlKit(bitmap)
+                    // ML Kit's processMlKit will recycle it in addOnCompleteListener
+                }
+                else -> {
+                    bitmap.recycle()
+                }
             }
         }
     }
 
     private fun processMlKit(bitmap: Bitmap) {
-        mlKitSegmenter?.process(InputImage.fromBitmap(bitmap, 0))?.addOnSuccessListener { result ->
-            val maskBuffer = result.buffer; maskBuffer.rewind()
-            val width = result.width; val height = result.height
-            val pixels = ByteArray(width * height)
-            for (i in 0 until width * height) {
-                if (maskBuffer.hasRemaining()) {
-                    pixels[i] = (if (maskBuffer.float > 0.45f) 255 else 0).toByte()
-                }
-            }
-            val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
-            maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
-            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(maskBitmap, bitmap, startColor, endColor, isMirrorMode) }
+        val segmenter = mlKitSegmenter
+        if (segmenter == null || bitmap.isRecycled) {
+            bitmap.recycle()
+            return
         }
+        segmenter.process(InputImage.fromBitmap(bitmap, 0))
+            .addOnCompleteListener {
+                bitmap.recycle()
+            }
+            .addOnSuccessListener { result ->
+                val maskBuffer = result.buffer
+                val width = result.width
+                val height = result.height
+                val pixels = ByteArray(width * height)
+                maskBuffer.rewind()
+                for (i in 0 until width * height) {
+                    if (maskBuffer.hasRemaining()) {
+                        pixels[i] = (if (maskBuffer.float > 0.45f) 255 else 0).toByte()
+                    }
+                }
+                val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
+                maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
+                activity?.runOnUiThread { _binding?.bodyOverlay?.updateMaskOnly(maskBitmap, startColor, endColor, isMirrorMode) }
+            }
     }
 
     private fun processYolact(bitmap: Bitmap) {
@@ -506,8 +523,15 @@ class BodyChangerFragment : Fragment() {
             val coeffs = FloatArray(32); yolactOutputCoeffs?.rewind()
             val fb = yolactOutputCoeffs?.asFloatBuffer(); fb?.position(bestIdx * 32); fb?.get(coeffs)
             val mask = generateYolactMask(coeffs, yolactOutputProtos!!)
-            val finalMask = Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true)
-            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode) }
+            
+            val finalMask = try {
+                Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true)
+            } catch (e: Exception) { mask }
+            
+            if (finalMask != mask) {
+                mask.recycle()
+            }
+            activity?.runOnUiThread { _binding?.bodyOverlay?.updateMaskOnly(finalMask, startColor, endColor, isMirrorMode) }
         }
     }
 
@@ -545,8 +569,15 @@ class BodyChangerFragment : Fragment() {
         val mask = Bitmap.createBitmap(256, 256, Bitmap.Config.ALPHA_8)
         pixels.rewind()
         mask.copyPixelsFromBuffer(pixels)
-        val finalMask = Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true)
-        activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode) }
+        
+        val finalMask = try {
+            Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true)
+        } catch (e: Exception) { mask }
+        
+        if (finalMask != mask) {
+            mask.recycle()
+        }
+        activity?.runOnUiThread { _binding?.bodyOverlay?.updateMaskOnly(finalMask, startColor, endColor, isMirrorMode) }
     }
 
     private fun processImageProxy(imageProxy: ImageProxy): Bitmap? {
@@ -554,8 +585,15 @@ class BodyChangerFragment : Fragment() {
             val buffer = imageProxy.planes[0].buffer; buffer.rewind()
             val bitmap = Bitmap.createBitmap(imageProxy.width, imageProxy.height, Bitmap.Config.ARGB_8888)
             bitmap.copyPixelsFromBuffer(buffer)
-            val matrix = Matrix().apply { postRotate(imageProxy.imageInfo.rotationDegrees.toFloat()); postScale(-1f, 1f) }
-            Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            val matrix = Matrix().apply { 
+                postRotate(imageProxy.imageInfo.rotationDegrees.toFloat())
+                postScale(-1f, 1f) 
+            }
+            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            if (rotated != bitmap) {
+                bitmap.recycle()
+            }
+            rotated
         } catch (e: Exception) { null }
     }
 
