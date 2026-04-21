@@ -175,7 +175,11 @@ class TransformFragment : Fragment() {
                     val poseBase = BaseOptions.builder().setModelAssetPath("pose_landmarker_lite.task")
                     if (poseDel == "GPU") poseBase.setDelegate(Delegate.GPU)
                     poseLandmarker = PoseLandmarker.createFromOptions(requireContext(), PoseLandmarker.PoseLandmarkerOptions.builder()
-                        .setBaseOptions(poseBase.build()).setRunningMode(RunningMode.LIVE_STREAM)
+                        .setBaseOptions(poseBase.build())
+                        .setRunningMode(RunningMode.LIVE_STREAM)
+                        .setMinPoseDetectionConfidence(0.2f)    // 초기 탐지 기준 대폭 하향 (기본 0.5)
+                        .setMinPosePresenceConfidence(0.7f)     // 포즈 존재 확인 기준 상향 (기본 0.5)
+                        .setMinTrackingConfidence(0.7f)         // 추적 유지 기준 상향 (기본 0.5)
                         .setResultListener { result, _ -> lastPoseResult = result }.build())
 
                     val sExec = stylizerExecutor

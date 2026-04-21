@@ -210,6 +210,9 @@ class BodyChangerFragment : Fragment() {
                 .setBaseOptions(baseOptionsBuilder.build())
                 .setRunningMode(RunningMode.LIVE_STREAM)
                 .setOutputSegmentationMasks(true)
+                .setMinPoseDetectionConfidence(0.2f)  // 초기 탐지 기준 대폭 하향 (기본 0.5)
+                .setMinPosePresenceConfidence(0.7f)   // 포즈 존재 확인 기준 상향 (기본 0.5)
+                .setMinTrackingConfidence(0.7f)       // 추적 유지 기준 상향 (기본 0.5)
                 .setResultListener { result, image ->
                     processMediaPipePoseResult(result, image.width, image.height)
                 }
