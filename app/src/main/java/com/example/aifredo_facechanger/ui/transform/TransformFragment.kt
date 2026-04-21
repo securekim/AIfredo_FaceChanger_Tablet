@@ -87,6 +87,7 @@ class TransformFragment : Fragment() {
     @Volatile private var isReady = false
     private var renderMode = "Face_Only"
     private var useFaceLandmarkPref = true
+    private var isMirrorMode = false
     @Volatile private var currentCornerRatio = 0f
 
     private val frameCache = ConcurrentHashMap<Long, Bitmap>()
@@ -145,6 +146,7 @@ class TransformFragment : Fragment() {
         val sharedPref = activity?.getSharedPreferences("AIfredoPrefs", Context.MODE_PRIVATE) ?: return
         renderMode = sharedPref.getString("render_mode", "Face_Only") ?: "Face_Only"
         useFaceLandmarkPref = sharedPref.getBoolean("use_face_landmark", true)
+        isMirrorMode = sharedPref.getBoolean("face_mirror_mode", false)
         isRtspMode = sharedPref.getString("cam_source", "Embedded") == "RTSP"
     }
 
@@ -398,7 +400,7 @@ class TransformFragment : Fragment() {
             _binding?.faceOverlay?.updateFrame(
                 original = newFrame, stylized = lastStylizedBitmap, sCenter = PointF(filteredCenterX, filteredCenterY),
                 sSize = filteredSize, curFace = lastFaceResult, curPose = lastPoseResult, mode = renderMode,
-                isFaceActive = useFaceLandmarkPref, shapeProgress = currentCornerRatio
+                isFaceActive = useFaceLandmarkPref, isMirrorMode = isMirrorMode, shapeProgress = currentCornerRatio
             )
         }
     }

@@ -90,6 +90,7 @@ class BodyChangerFragment : Fragment() {
     private var selectedDelegate: String = "CPU"
     private var actualDelegate: String = "CPU"
     private var rtspQuality: String = "High"
+    private var isMirrorMode: Boolean = false
 
     private val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     private val TAG = "BodyChanger"
@@ -155,6 +156,7 @@ class BodyChangerFragment : Fragment() {
         val endColorStr = sharedPref.getString("body_end_color", "#0000FF") ?: "#0000FF"
         isRtspMode = sharedPref.getString("cam_source", "Embedded") == "RTSP"
         rtspQuality = sharedPref.getString("rtsp_quality", "High") ?: "High"
+        isMirrorMode = sharedPref.getBoolean("body_mirror_mode", false)
 
         try {
             startColor = Color.parseColor(startColorStr)
@@ -211,8 +213,8 @@ class BodyChangerFragment : Fragment() {
                 .setRunningMode(RunningMode.LIVE_STREAM)
                 .setOutputSegmentationMasks(true)
                 .setMinPoseDetectionConfidence(0.2f)  // 초기 탐지 기준 대폭 하향 (기본 0.5)
-                .setMinPosePresenceConfidence(0.7f)   // 포즈 존재 확인 기준 상향 (기본 0.5)
-                .setMinTrackingConfidence(0.7f)       // 추적 유지 기준 상향 (기본 0.5)
+                .setMinPosePresenceConfidence(0.4f)   // 포즈 존재 확인 기준 하향 (기본 0.5) - 사람이 흐릿해도 추적을 쉽게 포기하지 말 것
+                .setMinTrackingConfidence(0.4f)       // 추적 유지 기준 하향 (기본 0.5) - 관절이 부정확해도 박스를 유지할 것
                 .setResultListener { result, image ->
                     processMediaPipePoseResult(result, image.width, image.height)
                 }
@@ -254,7 +256,7 @@ class BodyChangerFragment : Fragment() {
                 maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
                 val finalMask = Bitmap.createScaledBitmap(maskBitmap, originalWidth, originalHeight, true)
                 maskBitmap.recycle()
-                activity?.runOnUiThread { _binding?.bodyOverlay?.updateMaskOnly(finalMask, startColor, endColor) }
+                activity?.runOnUiThread { _binding?.bodyOverlay?.updateMaskOnly(finalMask, startColor, endColor, isMirrorMode) }
             } catch (e: Exception) {}
         }
     }
@@ -482,7 +484,7 @@ class BodyChangerFragment : Fragment() {
             }
             val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
             maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
-            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(maskBitmap, bitmap, startColor, endColor) }
+            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(maskBitmap, bitmap, startColor, endColor, isMirrorMode) }
         }
     }
 
@@ -505,7 +507,7 @@ class BodyChangerFragment : Fragment() {
             val fb = yolactOutputCoeffs?.asFloatBuffer(); fb?.position(bestIdx * 32); fb?.get(coeffs)
             val mask = generateYolactMask(coeffs, yolactOutputProtos!!)
             val finalMask = Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true)
-            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor) }
+            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode) }
         }
     }
 
@@ -544,7 +546,7 @@ class BodyChangerFragment : Fragment() {
         pixels.rewind()
         mask.copyPixelsFromBuffer(pixels)
         val finalMask = Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true)
-        activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor) }
+        activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode) }
     }
 
     private fun processImageProxy(imageProxy: ImageProxy): Bitmap? {

@@ -33,6 +33,7 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
     private var lastValidFaceResult: FaceLandmarkerResult? = null
     private var currentPoseResult: PoseLandmarkerResult? = null
     private var isFaceActive: Boolean = false
+    private var isMirrorMode: Boolean = false
 
     private val poseFiltersX = mutableMapOf<Int, OneEuroFilter>()
     private val poseFiltersY = mutableMapOf<Int, OneEuroFilter>()
@@ -54,6 +55,7 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
         curPose: PoseLandmarkerResult?,
         mode: String,
         isFaceActive: Boolean,
+        isMirrorMode: Boolean,
         shapeProgress: Float = 0f
     ) {
         this.originalBitmap = original
@@ -71,7 +73,6 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
             transitionStartTime = System.currentTimeMillis()
         } else if (stylized == null) {
             // If stylized is explicitly null, we might want to keep the last one or clear it.
-            // For now, let's keep the last one to avoid flickering if detection fails for a frame.
         } else {
             // Same bitmap instance, just update position
             this.currentStylizedCenter.set(sCenter)
@@ -84,6 +85,7 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
         }
         this.currentPoseResult = curPose
         this.isFaceActive = isFaceActive
+        this.isMirrorMode = isMirrorMode
         this.shapeProgress = shapeProgress
 
         applyPoseFilter(curPose)
@@ -109,24 +111,29 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
         val scale = max(midX / bitmap.width, height.toFloat() / bitmap.height)
         val drawW = bitmap.width * scale
         val drawH = bitmap.height * scale
-        val offsetX = (midX - drawW) / 2f
+        val leftAreaOffX = (midX - drawW) / 2f
+        val rightAreaOffX = midX + (midX - drawW) / 2f
         val offsetY = (height.toFloat() - drawH) / 2f
-        val offX = midX + offsetX
 
-        // 1. Left: Original
+        val originalAreaOffX = if (isMirrorMode) rightAreaOffX else leftAreaOffX
+        val stylizedAreaOffX = if (isMirrorMode) leftAreaOffX else rightAreaOffX
+        val originalClipRect = if (isMirrorMode) RectF(midX, 0f, width.toFloat(), height.toFloat()) else RectF(0f, 0f, midX, height.toFloat())
+        val stylizedClipRect = if (isMirrorMode) RectF(0f, 0f, midX, height.toFloat()) else RectF(midX, 0f, width.toFloat(), height.toFloat())
+
+        // 1. Original Side
         canvas.save()
-        canvas.clipRect(0f, 0f, midX, height.toFloat())
-        canvas.drawBitmap(bitmap, null, RectF(offsetX, offsetY, offsetX + drawW, offsetY + drawH), paint)
-        filteredPoseLandmarks?.forEach { canvas.drawCircle(offsetX + it.x * drawW, offsetY + it.y * drawH, 6f, posePointPaint) }
+        canvas.clipRect(originalClipRect)
+        canvas.drawBitmap(bitmap, null, RectF(originalAreaOffX, offsetY, originalAreaOffX + drawW, offsetY + drawH), paint)
+        filteredPoseLandmarks?.forEach { canvas.drawCircle(originalAreaOffX + it.x * drawW, offsetY + it.y * drawH, 6f, posePointPaint) }
         if (isFaceActive) {
-            currentFaceResult?.faceLandmarks()?.getOrNull(0)?.forEach { canvas.drawCircle(offsetX + it.x() * drawW, offsetY + it.y() * drawH, 3f, facePointPaint) }
+            currentFaceResult?.faceLandmarks()?.getOrNull(0)?.forEach { canvas.drawCircle(originalAreaOffX + it.x() * drawW, offsetY + it.y() * drawH, 3f, facePointPaint) }
         }
         canvas.restore()
 
-        // 2. Right: Stylized
+        // 2. Stylized Side
         canvas.save()
-        canvas.clipRect(midX, 0f, width.toFloat(), height.toFloat())
-        canvas.drawBitmap(bitmap, null, RectF(offX, offsetY, offX + drawW, offsetY + drawH), paint)
+        canvas.clipRect(stylizedClipRect)
+        canvas.drawBitmap(bitmap, null, RectF(stylizedAreaOffX, offsetY, stylizedAreaOffX + drawW, offsetY + drawH), paint)
 
         val currentTime = System.currentTimeMillis()
         val elapsed = currentTime - transitionStartTime
@@ -134,12 +141,12 @@ class FaceOverlayView(context: Context, attrs: AttributeSet?) : View(context, at
 
         // Draw previous frame during fade
         if (alpha < 1f && prevStylizedBitmap != null && !prevStylizedBitmap!!.isRecycled) {
-            drawStylizedArea(canvas, prevStylizedBitmap!!, prevStylizedCenter, prevStylizedSize, 1.0f - alpha, scale, offX, offsetY, drawW, drawH)
+            drawStylizedArea(canvas, prevStylizedBitmap!!, prevStylizedCenter, prevStylizedSize, 1.0f - alpha, scale, stylizedAreaOffX, offsetY, drawW, drawH)
         }
 
         // Draw current frame
         if (currentStylizedBitmap != null && !currentStylizedBitmap!!.isRecycled && currentStylizedSize > 0) {
-            drawStylizedArea(canvas, currentStylizedBitmap!!, currentStylizedCenter, currentStylizedSize, 1.0f, scale, offX, offsetY, drawW, drawH)
+            drawStylizedArea(canvas, currentStylizedBitmap!!, currentStylizedCenter, currentStylizedSize, 1.0f, scale, stylizedAreaOffX, offsetY, drawW, drawH)
         }
 
         if (alpha < 1f) invalidate()

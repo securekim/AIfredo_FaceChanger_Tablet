@@ -94,6 +94,11 @@ class SettingsFragment : Fragment() {
             sharedPref.edit().putBoolean("use_face_landmark", isChecked).apply()
         }
 
+        binding.switchFaceMirrorMode.isChecked = sharedPref.getBoolean("face_mirror_mode", false)
+        binding.switchFaceMirrorMode.setOnCheckedChangeListener { _, isChecked ->
+            sharedPref.edit().putBoolean("face_mirror_mode", isChecked).apply()
+        }
+
         // --- Body Settings ---
         val currentBodyModel = sharedPref.getString("body_model", "MediaPipe Pose")
         when (currentBodyModel) {
@@ -139,6 +144,11 @@ class SettingsFragment : Fragment() {
 
         binding.editBodyStartColor.setText(sharedPref.getString("body_start_color", "#FF0000"))
         binding.editBodyEndColor.setText(sharedPref.getString("body_end_color", "#0000FF"))
+
+        binding.switchBodyMirrorMode.isChecked = sharedPref.getBoolean("body_mirror_mode", false)
+        binding.switchBodyMirrorMode.setOnCheckedChangeListener { _, isChecked ->
+            sharedPref.edit().putBoolean("body_mirror_mode", isChecked).apply()
+        }
 
         // --- CAM Settings ---
         val camSource = sharedPref.getString("cam_source", "Embedded")

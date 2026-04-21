@@ -184,6 +184,14 @@
                         android:layout_height="wrap_content"
                         android:text="Full Frame (Everything Stylized)" />
                 </RadioGroup>
+
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/switch_face_mirror_mode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:text="Mirror Mode (Swap Left/Right)"
+                    android:textSize="18sp" />
             </LinearLayout>
         </ScrollView>
 
@@ -326,6 +334,14 @@
                     android:layout_height="wrap_content"
                     android:hint="#0000FF"
                     android:inputType="text" />
+
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/switch_body_mirror_mode"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:text="Mirror Mode (Swap Left/Right)"
+                    android:textSize="18sp" />
 
             </LinearLayout>
         </ScrollView>

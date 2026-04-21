@@ -15,6 +15,7 @@ class BodyOverlayView @JvmOverloads constructor(
     private var originalBitmap: Bitmap? = null
     private var startColor: Int = Color.RED
     private var endColor: Int = Color.BLUE
+    private var isMirrorMode: Boolean = false
 
     private val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         // Keeps the destination (gradient) where the source (mask) is present
@@ -22,18 +23,20 @@ class BodyOverlayView @JvmOverloads constructor(
     }
     private val gradientPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-    fun updateData(mask: Bitmap?, original: Bitmap?, startCol: Int, endCol: Int) {
+    fun updateData(mask: Bitmap?, original: Bitmap?, startCol: Int, endCol: Int, isMirror: Boolean = false) {
         maskBitmap = mask
         originalBitmap = original
         startColor = startCol
         endColor = endCol
+        isMirrorMode = isMirror
         postInvalidate()
     }
 
-    fun updateMaskOnly(mask: Bitmap?, startCol: Int, endCol: Int) {
+    fun updateMaskOnly(mask: Bitmap?, startCol: Int, endCol: Int, isMirror: Boolean = false) {
         maskBitmap = mask
         startColor = startCol
         endColor = endCol
+        isMirrorMode = isMirror
         postInvalidate()
     }
 
@@ -70,10 +73,12 @@ class BodyOverlayView @JvmOverloads constructor(
 
         val drawRect = RectF(dx, dy, dx + maskWidth * scale, dy + maskHeight * scale)
 
-        // Split screen: Only draw on the right half
+        // Split screen: Determine which half to draw on
         val halfWidth = viewWidth / 2f
+        val clipRect = if (isMirrorMode) RectF(0f, 0f, halfWidth, viewHeight) else RectF(halfWidth, 0f, viewWidth, viewHeight)
+
         canvas.save()
-        canvas.clipRect(halfWidth, 0f, viewWidth, viewHeight)
+        canvas.clipRect(clipRect)
 
         // Use a layer to apply the PorterDuff xfermode correctly
         val saveCount = canvas.saveLayer(0f, 0f, viewWidth, viewHeight, null)
