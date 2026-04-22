@@ -76,11 +76,12 @@ dependencies {
     // ML Kit
     implementation(libs.mlkit.segmentation.selfie)
 
-    // TensorFlow Lite
-    implementation(libs.tensorflow.lite)
-    implementation(libs.tensorflow.lite.gpu)
-    implementation(libs.tensorflow.lite.gpu.api)
-    implementation(libs.tensorflow.lite.support)
+    // TensorFlow Lite (Standalone)
+    implementation(libs.tflite.core)
+    implementation(libs.tflite.gpu)
+    implementation(libs.tflite.gpu.api)
+    implementation(libs.tflite.support)
+    implementation(libs.tflite.select.tf.ops)
 
     // Media3 (RTSP)
     implementation(libs.androidx.media3.exoplayer)

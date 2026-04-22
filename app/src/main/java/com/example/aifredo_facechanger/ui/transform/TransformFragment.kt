@@ -457,7 +457,10 @@ class TransformFragment : Fragment() {
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) { addLog("Playback Error: ${error.message}") }
                 override fun onPlaybackStateChanged(playbackState: Int) { if (playbackState == Player.STATE_READY && isRtspMode) addLog("RTSP Connected") }
             })
-            setMediaSource(RtspMediaSource.Factory().setForceUseRtpTcp(false).setTimeoutMs(4000).createMediaSource(mediaItem))
+            setMediaSource(RtspMediaSource.Factory()
+                .setForceUseRtpTcp(true)
+                .setTimeoutMs(4000)
+                .createMediaSource(mediaItem))
             prepare(); playWhenReady = true
         }
         binding.playerView.player = exoPlayer
