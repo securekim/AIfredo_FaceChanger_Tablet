@@ -224,31 +224,31 @@
                         android:id="@+id/radio_body_mediapipe_pose"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Mediapipe - Pose Landmark" />
+                        android:text="PoseLandmark\n(Framework: MediaPipe, Backbone: BlazePose, Model: Lite, Res: 256x256)" />
 
                     <RadioButton
                         android:id="@+id/radio_body_mlkit"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="ML Kit" />
+                        android:text="ML Kit\n(Framework: ML Kit, Backbone: Selfie Segmenter, Model: Base, Res: 256x256)" />
 
                     <RadioButton
                         android:id="@+id/radio_body_yolact"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="YOLACT (ResNet-50)" />
+                        android:text="YOLACT\n(Framework: TFLite, Backbone: ResNet-50, Model: Float16, Res: 550x550)" />
 
                     <RadioButton
                         android:id="@+id/radio_body_modnet"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="MODNet" />
+                        android:text="MODNet\n(Framework: TFLite, Backbone: MODNet, Model: Float16, Res: 256x256)" />
 
                     <RadioButton
                         android:id="@+id/radio_body_rvm"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="TFLite-ResNet50-RVM-192x320" />
+                        android:text="RVM\n(Framework: TFLite, Backbone: ResNet-50, Model: Float16, Res: 192x320)" />
                 </RadioGroup>
 
                 <TextView
