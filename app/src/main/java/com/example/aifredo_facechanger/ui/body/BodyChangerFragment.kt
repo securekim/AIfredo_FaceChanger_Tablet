@@ -69,21 +69,25 @@ class BodyChangerFragment : Fragment() {
     @Volatile private var yolactInterpreter: Interpreter? = null
     @Volatile private var modnetInterpreter: Interpreter? = null
     @Volatile private var rvmInterpreter: Interpreter? = null
+    @Volatile private var yoloxInterpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
     private var nnApiDelegate: NnApiDelegate? = null
 
     private var yolactImageProcessor: ImageProcessor? = null
     private var modnetImageProcessor: ImageProcessor? = null
     private var rvmImageProcessor: ImageProcessor? = null
+    private var yoloxImageProcessor: ImageProcessor? = null
     private var yolactTensorImage: TensorImage? = null
     private var modnetTensorImage: TensorImage? = null
     private var rvmTensorImage: TensorImage? = null
+    private var yoloxTensorImage: TensorImage? = null
 
     private var yolactOutputBoxes: ByteBuffer? = null
     private var yolactOutputScores: ByteBuffer? = null
     private var yolactOutputCoeffs: ByteBuffer? = null
     private var yolactOutputProtos: ByteBuffer? = null
     private var modnetOutputBuffer: ByteBuffer? = null
+    private var yoloxOutputBuffer: ByteBuffer? = null
 
     private var yolactIdxBoxes = 0
     private var yolactIdxScores = 1
@@ -133,6 +137,7 @@ class BodyChangerFragment : Fragment() {
     private val yolactModelFile = "yolact_550x550_model_float16_quant.tflite"
     private val modnetModelFile = "MODNet_256x256_model_float16_quant.tflite"
     private val rvmModelFile = "rvm_resnet50_192x320_model_float16_quant.tflite"
+    private val yoloxModelFile = "yolox_n_body_head_hand_post_0461_0.4428_1x3x256x320_float16.tflite"
 
     private var exoPlayer: ExoPlayer? = null
     private var isRtspMode = false
@@ -214,6 +219,7 @@ class BodyChangerFragment : Fragment() {
                     when (selectedModel) {
                         "MediaPipe Pose" -> initMediaPipePose()
                         "YOLACT" -> initYolact()
+                        "YOLOX" -> initYolox()
                         "MODNet" -> initModNet()
                         "RVM" -> initRvm()
                         "ML Kit" -> initMlKit()
@@ -233,6 +239,7 @@ class BodyChangerFragment : Fragment() {
             yolactInterpreter?.close(); yolactInterpreter = null
             modnetInterpreter?.close(); modnetInterpreter = null
             rvmInterpreter?.close(); rvmInterpreter = null
+            yoloxInterpreter?.close(); yoloxInterpreter = null
             gpuDelegate?.close(); gpuDelegate = null
             nnApiDelegate?.close(); nnApiDelegate = null
             rtspBitmapBuffer?.recycle(); rtspBitmapBuffer = null
@@ -364,6 +371,31 @@ class BodyChangerFragment : Fragment() {
             reusableMaskPixels = ByteBuffer.allocateDirect(256 * 256).order(ByteOrder.nativeOrder())
             addLog(">> MODNet Ready ($actualDelegate)")
         } catch (e: Exception) { addLog("MODNet Init Error: ${e.message}") }
+    }
+
+    private fun initYolox() {
+        try {
+            yoloxInterpreter = Interpreter(FileUtil.loadMappedFile(requireContext(), yoloxModelFile), getInterpreterOptions())
+            
+            // 하드코딩 대신 모델의 실제 입력 텐서 크기를 읽어와서 세팅합니다.
+            val inputShape = yoloxInterpreter!!.getInputTensor(0).shape()
+            
+            // 모델명이 1x3x256x320 이므로 NCHW 구조일 확률이 높습니다.
+            // NCHW일 경우 shape[2]가 Height, shape[3]이 Width 입니다.
+            val modelHeight = if (inputShape[1] == 3) inputShape[2] else inputShape[1]
+            val modelWidth = if (inputShape[1] == 3) inputShape[3] else inputShape[2]
+
+            yoloxImageProcessor = ImageProcessor.Builder()
+                .add(ResizeOp(modelHeight, modelWidth, ResizeOp.ResizeMethod.BILINEAR))
+                .add(NormalizeOp(0f, 255f))
+                .build()
+                
+            yoloxTensorImage = TensorImage(DataType.FLOAT32)
+            yoloxOutputBuffer = ByteBuffer.allocateDirect(yoloxInterpreter!!.getOutputTensor(0).numBytes()).order(ByteOrder.nativeOrder())
+            addLog(">> YOLOX Ready ($actualDelegate)")
+        } catch (e: Exception) { 
+            addLog("YOLOX Init Error: ${e.message}") 
+        }
     }
 
     private fun initRvm() {
@@ -621,6 +653,7 @@ class BodyChangerFragment : Fragment() {
                     isProcessing.set(false)
                 }
                 "YOLACT" -> processYolact(bitmap)
+                "YOLOX" -> processYolox(bitmap)
                 "MODNet" -> processModNet(bitmap)
                 "RVM" -> processRvm(bitmap)
                 "ML Kit" -> processMlKit(bitmap)
@@ -737,6 +770,39 @@ class BodyChangerFragment : Fragment() {
             _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode)
             isProcessing.set(false)
         }
+    }
+
+    private fun processYolox(bitmap: Bitmap) {
+        val interpreter = yoloxInterpreter
+        val tImage = yoloxTensorImage
+        if (interpreter == null || tImage == null) {
+            bitmap.recycle()
+            isProcessing.set(false)
+            return
+        }
+        tImage.load(bitmap)
+        val inputBuffer = yoloxImageProcessor?.process(tImage)?.buffer
+        if (inputBuffer == null) {
+            bitmap.recycle()
+            isProcessing.set(false)
+            return
+        }
+        yoloxOutputBuffer?.clear()
+        try {
+            interpreter.run(inputBuffer, yoloxOutputBuffer)
+        } catch (e: Exception) {
+            Log.e(tagStr, "YOLOX Inference Error", e)
+            bitmap.recycle()
+            isProcessing.set(false)
+            return
+        }
+        yoloxOutputBuffer?.rewind()
+
+        // NOTE: YOLOX는 객체 탐지 모델이므로 픽셀 단위 마스크를 출력하지 않습니다.
+        // 바운딩 박스 파싱 로직이 필요하며, 기존의 마스크 처리 로직은 논리적으로 부적절하여 제거되었습니다.
+        
+        bitmap.recycle()
+        isProcessing.set(false)
     }
 
     private fun processRvm(bitmap: Bitmap) {
