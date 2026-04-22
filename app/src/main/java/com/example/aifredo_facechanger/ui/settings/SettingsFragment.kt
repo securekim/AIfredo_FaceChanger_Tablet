@@ -106,6 +106,7 @@ class SettingsFragment : Fragment() {
             "ML Kit" -> binding.radioBodyMlkit.isChecked = true
             "YOLACT" -> binding.radioBodyYolact.isChecked = true
             "MODNet" -> binding.radioBodyModnet.isChecked = true
+            "RVM" -> binding.radioBodyRvm.isChecked = true
             else -> binding.radioBodyMediapipePose.isChecked = true
         }
 
@@ -115,6 +116,7 @@ class SettingsFragment : Fragment() {
                 R.id.radio_body_mlkit -> "ML Kit"
                 R.id.radio_body_yolact -> "YOLACT"
                 R.id.radio_body_modnet -> "MODNet"
+                R.id.radio_body_rvm -> "RVM"
                 else -> "MediaPipe Pose"
             }
             sharedPref.edit().putString("body_model", selected).apply()

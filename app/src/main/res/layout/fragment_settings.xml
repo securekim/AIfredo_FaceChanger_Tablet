@@ -243,6 +243,12 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="MODNet" />
+
+                    <RadioButton
+                        android:id="@+id/radio_body_rvm"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="TFLite-ResNet50-RVM-480x640" />
                 </RadioGroup>
 
                 <TextView

@@ -64,19 +64,49 @@ class BodyChangerFragment : Fragment() {
     @Volatile private var poseLandmarker: PoseLandmarker? = null
     @Volatile private var yolactInterpreter: Interpreter? = null
     @Volatile private var modnetInterpreter: Interpreter? = null
+    @Volatile private var rvmInterpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
     private var nnApiDelegate: NnApiDelegate? = null
 
     private var yolactImageProcessor: ImageProcessor? = null
     private var modnetImageProcessor: ImageProcessor? = null
+    private var rvmImageProcessor: ImageProcessor? = null
     private var yolactTensorImage: TensorImage? = null
     private var modnetTensorImage: TensorImage? = null
+    private var rvmTensorImage: TensorImage? = null
 
     private var yolactOutputBoxes: ByteBuffer? = null
     private var yolactOutputScores: ByteBuffer? = null
     private var yolactOutputCoeffs: ByteBuffer? = null
     private var yolactOutputProtos: ByteBuffer? = null
     private var modnetOutputBuffer: ByteBuffer? = null
+    
+    private var yolactIdxBoxes = 0
+    private var yolactIdxScores = 1
+    private var yolactIdxCoeffs = 2
+    private var yolactIdxProtos = 3
+
+    // RVM Buffers
+    private var rvmOutputPha: ByteBuffer? = null
+    private var rvmOutputFgr: ByteBuffer? = null
+    private var r1i: ByteBuffer? = null
+    private var r2i: ByteBuffer? = null
+    private var r3i: ByteBuffer? = null
+    private var r4i: ByteBuffer? = null
+    private var r1o: ByteBuffer? = null
+    private var r2o: ByteBuffer? = null
+    private var r3o: ByteBuffer? = null
+    private var r4o: ByteBuffer? = null
+    private var rvmRatioBuffer: ByteBuffer? = null
+
+    private var rvmH: Int = 480
+    private var rvmW: Int = 640
+    private var rvmIdxSrc = 0
+    private var rvmIdxR1i = 1; private var rvmIdxR2i = 2; private var rvmIdxR3i = 3; private var rvmIdxR4i = 4
+    private var rvmIdxRatio = -1
+    private var rvmIdxPha = 0; private var rvmIdxFgr = 1
+    private var rvmIdxR1o = 2; private var rvmIdxR2o = 3; private var rvmIdxR3o = 4; private var rvmIdxR4o = 5
+    private var isRvmNCHW = false
 
     private var reusableMaskPixels: ByteBuffer? = null
     private var reusableProtosArray: FloatArray? = null
@@ -97,6 +127,7 @@ class BodyChangerFragment : Fragment() {
 
     private val YOLACT_MODEL_FILE = "yolact_550x550_model_float16_quant.tflite"
     private val MODNET_MODEL_FILE = "MODNet_256x256_model_float16_quant.tflite"
+    private val RVM_MODEL_FILE = "rvm_resnet50_480x640_model_float16_quant.tflite"
 
     // RTSP
     private var exoPlayer: ExoPlayer? = null
@@ -181,6 +212,7 @@ class BodyChangerFragment : Fragment() {
                         "MediaPipe Pose" -> initMediaPipePose()
                         "YOLACT" -> initYolact()
                         "MODNet" -> initModNet()
+                        "RVM" -> initRvm()
                         "ML Kit" -> initMlKit()
                         else -> initMediaPipePose()
                     }
@@ -197,6 +229,7 @@ class BodyChangerFragment : Fragment() {
             poseLandmarker?.close(); poseLandmarker = null
             yolactInterpreter?.close(); yolactInterpreter = null
             modnetInterpreter?.close(); modnetInterpreter = null
+            rvmInterpreter?.close(); rvmInterpreter = null
             gpuDelegate?.close(); gpuDelegate = null
             nnApiDelegate?.close(); nnApiDelegate = null
         } catch (e: Exception) {}
@@ -283,7 +316,9 @@ class BodyChangerFragment : Fragment() {
         if (selectedDelegate.uppercase() == "GPU") {
             try {
                 if (CompatibilityList().isDelegateSupportedOnThisDevice) {
-                    gpuDelegate = GpuDelegate(GpuDelegate.Options().apply { setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED) })
+                    gpuDelegate = GpuDelegate(GpuDelegate.Options().apply { 
+                        setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
+                    })
                     options.addDelegate(gpuDelegate); actualDelegate = "GPU"
                 }
             } catch (e: Exception) {}
@@ -297,12 +332,33 @@ class BodyChangerFragment : Fragment() {
         try {
             val interpreter = Interpreter(FileUtil.loadMappedFile(requireContext(), YOLACT_MODEL_FILE), getInterpreterOptions())
             yolactInterpreter = interpreter
+            
+            for (i in 0 until interpreter.outputTensorCount) {
+                val shape = interpreter.getOutputTensor(i).shape()
+                val name = interpreter.getOutputTensor(i).name().lowercase()
+                if (name.contains("box")) yolactIdxBoxes = i
+                else if (name.contains("score") || name.contains("conf")) yolactIdxScores = i
+                else if (name.contains("coeff") || name.contains("mask")) yolactIdxCoeffs = i
+                else if (name.contains("proto")) yolactIdxProtos = i
+                else if (shape.size == 3) {
+                    when (shape[2]) {
+                        4 -> yolactIdxBoxes = i
+                        81 -> yolactIdxScores = i
+                        32 -> yolactIdxCoeffs = i
+                    }
+                } else if (shape.size == 4) {
+                    if (shape[1] == 32 || shape[3] == 32) yolactIdxProtos = i
+                }
+            }
+
             yolactImageProcessor = ImageProcessor.Builder().add(ResizeOp(550, 550, ResizeOp.ResizeMethod.BILINEAR)).add(NormalizeOp(floatArrayOf(123.675f, 116.28f, 103.53f), floatArrayOf(58.395f, 57.12f, 57.375f))).build()
             yolactTensorImage = TensorImage(DataType.FLOAT32)
-            yolactOutputBoxes = ByteBuffer.allocateDirect(19248 * 4 * 4).order(ByteOrder.nativeOrder())
-            yolactOutputScores = ByteBuffer.allocateDirect(19248 * 81 * 4).order(ByteOrder.nativeOrder())
-            yolactOutputCoeffs = ByteBuffer.allocateDirect(19248 * 32 * 4).order(ByteOrder.nativeOrder())
-            yolactOutputProtos = ByteBuffer.allocateDirect(138 * 138 * 32 * 4).order(ByteOrder.nativeOrder())
+            
+            yolactOutputBoxes = ByteBuffer.allocateDirect(interpreter.getOutputTensor(yolactIdxBoxes).numBytes()).order(ByteOrder.nativeOrder())
+            yolactOutputScores = ByteBuffer.allocateDirect(interpreter.getOutputTensor(yolactIdxScores).numBytes()).order(ByteOrder.nativeOrder())
+            yolactOutputCoeffs = ByteBuffer.allocateDirect(interpreter.getOutputTensor(yolactIdxCoeffs).numBytes()).order(ByteOrder.nativeOrder())
+            yolactOutputProtos = ByteBuffer.allocateDirect(interpreter.getOutputTensor(yolactIdxProtos).numBytes()).order(ByteOrder.nativeOrder())
+            
             reusableMaskPixels = ByteBuffer.allocateDirect(256 * 256).order(ByteOrder.nativeOrder())
             reusableProtosArray = FloatArray(138 * 138 * 32)
             reusableScoresArray = FloatArray(19248 * 81)
@@ -315,10 +371,104 @@ class BodyChangerFragment : Fragment() {
             modnetInterpreter = Interpreter(FileUtil.loadMappedFile(requireContext(), MODNET_MODEL_FILE), getInterpreterOptions())
             modnetImageProcessor = ImageProcessor.Builder().add(ResizeOp(256, 256, ResizeOp.ResizeMethod.BILINEAR)).add(NormalizeOp(floatArrayOf(127.5f, 127.5f, 127.5f), floatArrayOf(127.5f, 127.5f, 127.5f))).build()
             modnetTensorImage = TensorImage(DataType.FLOAT32)
-            modnetOutputBuffer = ByteBuffer.allocateDirect(1 * 256 * 256 * 1 * 4).order(ByteOrder.nativeOrder())
+            modnetOutputBuffer = ByteBuffer.allocateDirect(modnetInterpreter!!.getOutputTensor(0).numBytes()).order(ByteOrder.nativeOrder())
             reusableMaskPixels = ByteBuffer.allocateDirect(256 * 256).order(ByteOrder.nativeOrder())
             addLog(">> MODNet Ready ($actualDelegate)")
         } catch (e: Exception) { addLog("MODNet Init Error: ${e.message}") }
+    }
+
+    private fun initRvm() {
+        try {
+            val modelFile = FileUtil.loadMappedFile(requireContext(), RVM_MODEL_FILE)
+            var interpreter: Interpreter? = null
+            
+            if (selectedDelegate.uppercase() == "GPU") {
+                try {
+                    val options = Interpreter.Options()
+                    gpuDelegate = GpuDelegate(GpuDelegate.Options().apply {
+                        setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
+                        setPrecisionLossAllowed(true)
+                    })
+                    options.addDelegate(gpuDelegate)
+                    interpreter = Interpreter(modelFile, options)
+                    actualDelegate = "GPU"
+                    addLog("RVM: GPU Delegate applied")
+                } catch (e: Exception) {
+                    addLog("RVM: GPU Delegate failed: ${e.message}")
+                    gpuDelegate?.close(); gpuDelegate = null
+                }
+            }
+            
+            if (interpreter == null) {
+                val options = Interpreter.Options().setNumThreads(4)
+                interpreter = Interpreter(modelFile, options)
+                actualDelegate = "CPU"
+                addLog("RVM: Using CPU")
+            }
+            rvmInterpreter = interpreter!!
+
+            rvmIdxRatio = -1
+            for (i in 0 until rvmInterpreter!!.inputTensorCount) {
+                val t = rvmInterpreter!!.getInputTensor(i)
+                val name = t.name().lowercase()
+                if (name.contains("src")) rvmIdxSrc = i
+                else if (name.contains("r1i")) rvmIdxR1i = i
+                else if (name.contains("r2i")) rvmIdxR2i = i
+                else if (name.contains("r3i")) rvmIdxR3i = i
+                else if (name.contains("r4i")) rvmIdxR4i = i
+                else if (name.contains("ratio") || name.contains("downsample")) rvmIdxRatio = i
+                Log.d(TAG, "RVM Input $i: $name, Shape: ${t.shape().contentToString()}, Type: ${t.dataType()}")
+            }
+            for (i in 0 until rvmInterpreter!!.outputTensorCount) {
+                val t = rvmInterpreter!!.getOutputTensor(i)
+                val name = t.name().lowercase()
+                if (name.contains("fgr")) rvmIdxFgr = i
+                else if (name.contains("pha")) rvmIdxPha = i
+                else if (name.contains("r1o")) rvmIdxR1o = i
+                else if (name.contains("r2o")) rvmIdxR2o = i
+                else if (name.contains("r3o")) rvmIdxR3o = i
+                else if (name.contains("r4o")) rvmIdxR4o = i
+                Log.d(TAG, "RVM Output $i: $name, Shape: ${t.shape().contentToString()}, Type: ${t.dataType()}")
+            }
+
+            val srcShape = rvmInterpreter!!.getInputTensor(rvmIdxSrc).shape()
+            isRvmNCHW = srcShape[1] == 3
+            if (isRvmNCHW) {
+                rvmH = srcShape[2]; rvmW = srcShape[3]
+            } else {
+                rvmH = srcShape[1]; rvmW = srcShape[2]
+            }
+            
+            rvmImageProcessor = ImageProcessor.Builder()
+                .add(ResizeOp(rvmH, rvmW, ResizeOp.ResizeMethod.BILINEAR))
+                .add(NormalizeOp(0f, 255f))
+                .build()
+            rvmTensorImage = TensorImage(DataType.FLOAT32)
+            
+            fun allocateDirectBuffer(size: Int): ByteBuffer = ByteBuffer.allocateDirect(size).order(ByteOrder.nativeOrder())
+
+            rvmOutputFgr = allocateDirectBuffer(rvmInterpreter!!.getOutputTensor(rvmIdxFgr).numBytes())
+            rvmOutputPha = allocateDirectBuffer(rvmInterpreter!!.getOutputTensor(rvmIdxPha).numBytes())
+            r1i = allocateDirectBuffer(rvmInterpreter!!.getInputTensor(rvmIdxR1i).numBytes())
+            r2i = allocateDirectBuffer(rvmInterpreter!!.getInputTensor(rvmIdxR2i).numBytes())
+            r3i = allocateDirectBuffer(rvmInterpreter!!.getInputTensor(rvmIdxR3i).numBytes())
+            r4i = allocateDirectBuffer(rvmInterpreter!!.getInputTensor(rvmIdxR4i).numBytes())
+            r1o = allocateDirectBuffer(rvmInterpreter!!.getOutputTensor(rvmIdxR1o).numBytes())
+            r2o = allocateDirectBuffer(rvmInterpreter!!.getOutputTensor(rvmIdxR2o).numBytes())
+            r3o = allocateDirectBuffer(rvmInterpreter!!.getOutputTensor(rvmIdxR3o).numBytes())
+            r4o = allocateDirectBuffer(rvmInterpreter!!.getOutputTensor(rvmIdxR4o).numBytes())
+            
+            if (rvmIdxRatio != -1) {
+                rvmRatioBuffer = allocateDirectBuffer(rvmInterpreter!!.getInputTensor(rvmIdxRatio).numBytes())
+                if (rvmRatioBuffer!!.capacity() >= 4) rvmRatioBuffer!!.asFloatBuffer().put(1.0f)
+            }
+            
+            reusableMaskPixels = allocateDirectBuffer(rvmW * rvmH)
+            addLog(">> RVM Ready ($actualDelegate) ${rvmW}x${rvmH}")
+        } catch (e: Exception) {
+            addLog("RVM Init Error: ${e.message}")
+            Log.e(TAG, "RVM Init Error", e)
+        }
     }
 
     private fun startStream() {
@@ -411,6 +561,7 @@ class BodyChangerFragment : Fragment() {
         rtspFrameHandler.post(rtspFrameRunnable)
     }
 
+    @OptIn(UnstableApi::class)
     private fun extractFrameFromPlayer() {
         val b = _binding ?: return
         val textureView = b.playerView.videoSurfaceView as? TextureView ?: return
@@ -456,8 +607,6 @@ class BodyChangerFragment : Fragment() {
             when (selectedModel) {
                 "MediaPipe Pose" -> {
                     poseLandmarker?.detectAsync(BitmapImageBuilder(bitmap).build(), System.currentTimeMillis())
-                    // MediaPipe Pose detects asynchronously, and it's safer not to recycle the input bitmap immediately.
-                    // To avoid OOM, consider a pooling strategy or careful lifecycle management.
                 }
                 "YOLACT" -> {
                     processYolact(bitmap)
@@ -467,9 +616,12 @@ class BodyChangerFragment : Fragment() {
                     processModNet(bitmap)
                     bitmap.recycle()
                 }
+                "RVM" -> {
+                    processRvm(bitmap)
+                    bitmap.recycle()
+                }
                 "ML Kit" -> {
                     processMlKit(bitmap)
-                    // ML Kit's processMlKit will recycle it in addOnCompleteListener
                 }
                 else -> {
                     bitmap.recycle()
@@ -510,11 +662,21 @@ class BodyChangerFragment : Fragment() {
         val tImage = yolactTensorImage ?: return
         tImage.load(bitmap)
         val inputBuffer = yolactImageProcessor?.process(tImage)?.buffer ?: return
-        val outputs = mutableMapOf<Int, Any>()
+        
         yolactOutputBoxes?.clear(); yolactOutputScores?.clear(); yolactOutputCoeffs?.clear(); yolactOutputProtos?.clear()
-        outputs[0] = yolactOutputBoxes!!; outputs[1] = yolactOutputScores!!
-        outputs[2] = yolactOutputCoeffs!!; outputs[3] = yolactOutputProtos!!
-        try { interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs) } catch (e: Exception) { return }
+        val outputs = mutableMapOf<Int, Any>()
+        outputs[yolactIdxBoxes] = yolactOutputBoxes!!
+        outputs[yolactIdxScores] = yolactOutputScores!!
+        outputs[yolactIdxCoeffs] = yolactOutputCoeffs!!
+        outputs[yolactIdxProtos] = yolactOutputProtos!!
+        
+        try { 
+            interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs) 
+        } catch (e: Exception) { 
+            Log.e(TAG, "YOLACT Run Error: ${e.message}")
+            return 
+        }
+        
         yolactOutputScores?.rewind(); val scoresArray = reusableScoresArray ?: return
         yolactOutputScores?.asFloatBuffer()?.get(scoresArray)
         var bestIdx = -1; var maxScore = 0f
@@ -567,6 +729,80 @@ class BodyChangerFragment : Fragment() {
             }
         }
         val mask = Bitmap.createBitmap(256, 256, Bitmap.Config.ALPHA_8)
+        pixels.rewind()
+        mask.copyPixelsFromBuffer(pixels)
+        
+        val finalMask = try {
+            Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true)
+        } catch (e: Exception) { mask }
+        
+        if (finalMask != mask) {
+            mask.recycle()
+        }
+        activity?.runOnUiThread { _binding?.bodyOverlay?.updateMaskOnly(finalMask, startColor, endColor, isMirrorMode) }
+    }
+
+    private fun processRvm(bitmap: Bitmap) {
+        val interpreter = rvmInterpreter ?: return
+        val tImage = rvmTensorImage ?: return
+        tImage.load(bitmap)
+        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: return
+        
+        r1i!!.rewind(); r2i!!.rewind(); r3i!!.rewind(); r4i!!.rewind()
+        val inputs = arrayOfNulls<Any>(interpreter.inputTensorCount)
+        inputs[rvmIdxSrc] = inputBuffer
+        inputs[rvmIdxR1i] = r1i!!
+        inputs[rvmIdxR2i] = r2i!!
+        inputs[rvmIdxR3i] = r3i!!
+        inputs[rvmIdxR4i] = r4i!!
+        if (rvmIdxRatio != -1) inputs[rvmIdxRatio] = rvmRatioBuffer!!
+        
+        for (i in inputs.indices) {
+            if (inputs[i] == null) {
+                val t = interpreter.getInputTensor(i)
+                inputs[i] = ByteBuffer.allocateDirect(t.numBytes()).order(ByteOrder.nativeOrder())
+            }
+        }
+
+        rvmOutputFgr?.clear(); rvmOutputPha?.clear()
+        r1o?.clear(); r2o?.clear(); r3o?.clear(); r4o?.clear()
+        
+        val outputs = mutableMapOf<Int, Any>()
+        outputs[rvmIdxFgr] = rvmOutputFgr!!
+        outputs[rvmIdxPha] = rvmOutputPha!!
+        outputs[rvmIdxR1o] = r1o!!
+        outputs[rvmIdxR2o] = r2o!!
+        outputs[rvmIdxR3o] = r3o!!
+        outputs[rvmIdxR4o] = r4o!!
+        
+        try {
+            interpreter.runForMultipleInputsOutputs(inputs, outputs)
+            
+            r1i!!.rewind(); r1o!!.rewind()
+            if (r1i!!.capacity() == r1o!!.capacity()) r1i!!.put(r1o!!)
+            r2i!!.rewind(); r2o!!.rewind()
+            if (r2i!!.capacity() == r2o!!.capacity()) r2i!!.put(r2o!!)
+            r3i!!.rewind(); r3o!!.rewind()
+            if (r3i!!.capacity() == r3o!!.capacity()) r3i!!.put(r3o!!)
+            r4i!!.rewind(); r4o!!.rewind()
+            if (r4i!!.capacity() == r4o!!.capacity()) r4i!!.put(r4o!!)
+        } catch (e: Exception) {
+            val msg = "${e.javaClass.simpleName}: ${e.message ?: "Unknown Error"}"
+            Log.e(TAG, "RVM Run Error: $msg")
+            addLog("RVM Run Error: $msg")
+            return
+        }
+        
+        rvmOutputPha?.rewind()
+        val fb = rvmOutputPha?.asFloatBuffer() ?: return
+        val pixels = reusableMaskPixels!!; pixels.clear()
+        for (i in 0 until (rvmH * rvmW)) {
+            if (fb.hasRemaining()) {
+                val alpha = fb.get()
+                pixels.put((if (alpha > 0.5f) 255 else 0).toByte())
+            }
+        }
+        val mask = Bitmap.createBitmap(rvmW, rvmH, Bitmap.Config.ALPHA_8)
         pixels.rewind()
         mask.copyPixelsFromBuffer(pixels)
         
