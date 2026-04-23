@@ -896,7 +896,6 @@ class BodyChangerFragment : Fragment() {
     private fun processYoloxHybrid(bitmap: Bitmap) {
         val yolox = yoloxInterpreter
         val rvm = rvmInterpreter
-        val yInBuf = yoloxOutputBuffer
         if (yolox == null || rvm == null) {
             bitmap.recycle()
             isProcessing.set(false)
@@ -909,12 +908,13 @@ class BodyChangerFragment : Fragment() {
             yolox.run(yoloxInput, yoloxOutputBuffer)
         } catch (e: Exception) {
             Log.e(tagStr, "YOLOX Error", e)
-            bitmap.recycle(); isProcessing.set(false); return
+            bitmap.recycle()
+            isProcessing.set(false)
+            return
         }
 
         yoloxOutputBuffer?.rewind()
         val yoloxFb = yoloxOutputBuffer?.asFloatBuffer() ?: run { bitmap.recycle(); isProcessing.set(false); return }
-
         val yLen = yoloxFb.remaining()
         val yArr = yoloxFloatArray ?: FloatArray(yLen).also { yoloxFloatArray = it }
         yoloxFb.get(yArr)
@@ -950,18 +950,33 @@ class BodyChangerFragment : Fragment() {
             }
         }
 
-        val tImage = rvmTensorImage ?: run { bitmap.recycle(); isProcessing.set(false); return }
-        tImage.load(bitmap)
-        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: run { bitmap.recycle(); isProcessing.set(false); return }
+        val paddingX = bestBox.width() * 0.15f
+        val paddingY = bestBox.height() * 0.15f
+        var left = (bestBox.left - paddingX).toInt().coerceAtLeast(0)
+        var top = (bestBox.top - paddingY).toInt().coerceAtLeast(0)
+        var right = (bestBox.right + paddingX).toInt().coerceAtMost(bitmap.width)
+        var bottom = (bestBox.bottom + paddingY).toInt().coerceAtMost(bitmap.height)
+        var cropW = right - left
+        var cropH = bottom - top
 
-        val inputs = rvmInputs ?: run { bitmap.recycle(); isProcessing.set(false); return }
-        val outputs = rvmOutputs ?: run { bitmap.recycle(); isProcessing.set(false); return }
+        if (cropW <= 0 || cropH <= 0) {
+            left = 0; top = 0; cropW = bitmap.width; cropH = bitmap.height
+        }
+
+        val croppedBitmap = Bitmap.createBitmap(bitmap, left, top, cropW, cropH)
+
+        val tImage = rvmTensorImage ?: run { croppedBitmap.recycle(); bitmap.recycle(); isProcessing.set(false); return }
+        tImage.load(croppedBitmap)
+        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: run { croppedBitmap.recycle(); bitmap.recycle(); isProcessing.set(false); return }
+
+        val totalPixels = rvmW * rvmH
+        val inputs = rvmInputs ?: run { croppedBitmap.recycle(); bitmap.recycle(); isProcessing.set(false); return }
+        val outputs = rvmOutputs ?: run { croppedBitmap.recycle(); bitmap.recycle(); isProcessing.set(false); return }
 
         if (isRvmNCHW) {
             val nchw = rvmNchwBuffer ?: ByteBuffer.allocateDirect(1 * 3 * rvmW * rvmH * 4).order(ByteOrder.nativeOrder()).also { rvmNchwBuffer = it }
             nchw.clear()
             val fbIn = inputBuffer.asFloatBuffer()
-            val totalPixels = rvmW * rvmH
             val inputArr = rvmInputArr ?: FloatArray(totalPixels * 3).also { rvmInputArr = it }
             fbIn.get(inputArr)
 
@@ -996,13 +1011,16 @@ class BodyChangerFragment : Fragment() {
         if (rvmIdxR2i != -1) { inputs[rvmIdxR2i] = rvmStateBuffers[1][rvmStateToggle]!!; rvmStateBuffers[1][rvmStateToggle]?.rewind() }
         if (rvmIdxR3i != -1) { inputs[rvmIdxR3i] = rvmStateBuffers[2][rvmStateToggle]!!; rvmStateBuffers[2][rvmStateToggle]?.rewind() }
         if (rvmIdxR4i != -1) { inputs[rvmIdxR4i] = rvmStateBuffers[3][rvmStateToggle]!!; rvmStateBuffers[3][rvmStateToggle]?.rewind() }
+
         if (rvmIdxRatio != -1) rvmRatioBuffer?.rewind()
 
         outputs.clear()
+
         if (rvmIdxR1o != -1) { outputs[rvmIdxR1o] = rvmStateBuffers[0][nextToggle]!!; rvmStateBuffers[0][nextToggle]?.clear() }
         if (rvmIdxR2o != -1) { outputs[rvmIdxR2o] = rvmStateBuffers[1][nextToggle]!!; rvmStateBuffers[1][nextToggle]?.clear() }
         if (rvmIdxR3o != -1) { outputs[rvmIdxR3o] = rvmStateBuffers[2][nextToggle]!!; rvmStateBuffers[2][nextToggle]?.clear() }
         if (rvmIdxR4o != -1) { outputs[rvmIdxR4o] = rvmStateBuffers[3][nextToggle]!!; rvmStateBuffers[3][nextToggle]?.clear() }
+
         if (rvmIdxFgr != -1) { outputs[rvmIdxFgr] = rvmOutputFgr!!; rvmOutputFgr?.clear() }
         if (rvmIdxPha != -1) { outputs[rvmIdxPha] = rvmOutputPha!!; rvmOutputPha?.clear() }
 
@@ -1010,36 +1028,31 @@ class BodyChangerFragment : Fragment() {
             rvm.runForMultipleInputsOutputs(inputs, outputs)
             rvmStateToggle = nextToggle
         } catch (e: Exception) {
-            Log.e(tagStr, "RVM Error", e)
-            bitmap.recycle(); isProcessing.set(false); return
+            Log.e(tagStr, "RVM Inference Error", e)
+            croppedBitmap.recycle()
+            bitmap.recycle()
+            isProcessing.set(false)
+            return
         }
 
         rvmOutputPha?.rewind()
-        val rvmFb = rvmOutputPha?.asFloatBuffer() ?: run { bitmap.recycle(); isProcessing.set(false); return }
+        val fbOut = rvmOutputPha?.asFloatBuffer() ?: run { croppedBitmap.recycle(); bitmap.recycle(); isProcessing.set(false); return }
+        val outArr = rvmOutputFloatArray ?: FloatArray(totalPixels).also { rvmOutputFloatArray = it }
+        fbOut.get(outArr)
 
-        val count = rvmH * rvmW
-        val byteArr = ByteArray(count)
-
-        val paddingX = (bestBox.width() * 0.1f) / bitmap.width * rvmW
-        val paddingY = (bestBox.height() * 0.1f) / bitmap.height * rvmH
-
-        val rvmBox = RectF(
-            (bestBox.left / bitmap.width * rvmW) - paddingX,
-            (bestBox.top / bitmap.height * rvmH) - paddingY,
-            (bestBox.right / bitmap.width * rvmW) + paddingX,
-            (bestBox.bottom / bitmap.height * rvmH) + paddingY
-        )
-
-        for (y in 0 until rvmH) {
-            for (x in 0 until rvmW) {
-                val idx = y * rvmW + x
-                val inBox = x >= rvmBox.left && x <= rvmBox.right && y >= rvmBox.top && y <= rvmBox.bottom
-                if (inBox && rvmFb.get(idx) > 0.5f) {
-                    byteArr[idx] = 255.toByte()
-                } else {
-                    byteArr[idx] = 0
+        val byteArr = rvmByteArray!!
+        val numCores = Runtime.getRuntime().availableProcessors()
+        val chunkSize = totalPixels / numCores
+        runBlocking {
+            (0 until numCores).map { coreIdx ->
+                launch(Dispatchers.Default) {
+                    val start = coreIdx * chunkSize
+                    val end = if (coreIdx == numCores - 1) totalPixels else (coreIdx + 1) * chunkSize
+                    for (i in start until end) {
+                        byteArr[i] = (if (outArr[i] > 0.5f) 255 else 0).toByte()
+                    }
                 }
-            }
+            }.forEach { it.join() }
         }
 
         val pixels = reusableMaskPixels!!
@@ -1047,16 +1060,18 @@ class BodyChangerFragment : Fragment() {
         pixels.put(byteArr)
         pixels.rewind()
 
-        val mask = rvmMaskBitmap!!
-        mask.copyPixelsFromBuffer(pixels)
+        val rvmCropMask = rvmMaskBitmap!!
+        rvmCropMask.copyPixelsFromBuffer(pixels)
 
-        val finalMask = if (mask.width != bitmap.width || mask.height != bitmap.height) {
-            Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true)
-        } else mask
+        val fullMask = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+        val canvas = Canvas(fullMask)
+        val dstRect = Rect(left, top, left + cropW, top + cropH)
+        canvas.drawBitmap(rvmCropMask, null, dstRect, null)
+
+        croppedBitmap.recycle()
 
         activity?.runOnUiThread {
-            _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode)
-            if (finalMask != mask) finalMask.recycle()
+            _binding?.bodyOverlay?.updateData(fullMask, bitmap, startColor, endColor, isMirrorMode)
             isProcessing.set(false)
         }
     }
