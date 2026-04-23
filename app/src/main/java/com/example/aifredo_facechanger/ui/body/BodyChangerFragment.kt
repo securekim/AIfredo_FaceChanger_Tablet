@@ -80,7 +80,9 @@ class BodyChangerFragment : Fragment() {
     @Volatile private var modnetInterpreter: Interpreter? = null
     @Volatile private var rvmInterpreter: Interpreter? = null
     @Volatile private var yoloxInterpreter: Interpreter? = null
+
     private var gpuDelegate: GpuDelegate? = null
+    private var yoloxGpuDelegate: GpuDelegate? = null
     private var nnApiDelegate: NnApiDelegate? = null
 
     private var yolactImageProcessor: ImageProcessor? = null
@@ -302,7 +304,7 @@ class BodyChangerFragment : Fragment() {
         binding.perfText.text = String.format(
             Locale.getDefault(),
             "CPU: %.1f%% (Peak: %.1f%%)\nMEM: %dMB (Peak: %dMB)\nGPU: %s",
-            cpuUsage, maxCpu, usedMem, maxMem, if (gpuDelegate != null) "Active" else if (nnApiDelegate != null) "NNAPI" else "Off"
+            cpuUsage, maxCpu, usedMem, maxMem, if (gpuDelegate != null || yoloxGpuDelegate != null) "Active" else if (nnApiDelegate != null) "NNAPI" else "Off"
         )
     }
 
@@ -314,8 +316,11 @@ class BodyChangerFragment : Fragment() {
             modnetInterpreter?.close(); modnetInterpreter = null
             rvmInterpreter?.close(); rvmInterpreter = null
             yoloxInterpreter?.close(); yoloxInterpreter = null
+
             gpuDelegate?.close(); gpuDelegate = null
+            yoloxGpuDelegate?.close(); yoloxGpuDelegate = null
             nnApiDelegate?.close(); nnApiDelegate = null
+
             rtspBitmapBuffer?.recycle(); rtspBitmapBuffer = null
             rvmMaskBitmap?.recycle(); rvmMaskBitmap = null
             rvmInputs = null
@@ -455,6 +460,26 @@ class BodyChangerFragment : Fragment() {
         return options
     }
 
+    private fun getYoloxGpuInterpreterOptions(): Interpreter.Options {
+        val options = Interpreter.Options()
+        options.setNumThreads(Runtime.getRuntime().availableProcessors())
+        try {
+            val gpuOptions = GpuDelegate.Options().apply {
+                setInferencePreference(GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED)
+                setPrecisionLossAllowed(true)
+            }
+            val delegate = GpuDelegate(gpuOptions)
+            yoloxGpuDelegate = delegate
+            options.addDelegate(delegate)
+            addLog(">> YOLOX GPU Delegate Applied")
+        } catch (e: Exception) {
+            Log.e(tagStr, "YOLOX GPU Force Failed, falling back to XNNPACK", e)
+            options.setUseXNNPACK(true)
+            addLog(">> YOLOX GPU Failed, Using XNNPACK")
+        }
+        return options
+    }
+
     private fun initYolact() {
         try {
             val interpreter = Interpreter(FileUtil.loadMappedFile(requireContext(), yolactModelFile), getInterpreterOptions())
@@ -492,12 +517,13 @@ class BodyChangerFragment : Fragment() {
 
     private fun initYolox() {
         try {
-            yoloxInterpreter = Interpreter(FileUtil.loadMappedFile(requireContext(), yoloxModelFile), getInterpreterOptions())
+            val options = getYoloxGpuInterpreterOptions()
+            yoloxInterpreter = Interpreter(FileUtil.loadMappedFile(requireContext(), yoloxModelFile), options)
             val inputShape = yoloxInterpreter!!.getInputTensor(0).shape()
             yoloxH = if (inputShape[1] == 3) inputShape[2] else inputShape[1]
             yoloxW = if (inputShape[1] == 3) inputShape[3] else inputShape[2]
             yoloxOutputBuffer = ByteBuffer.allocateDirect(yoloxInterpreter!!.getOutputTensor(0).numBytes()).order(ByteOrder.nativeOrder())
-            addLog(">> YOLOX Ready ($actualDelegate)")
+            addLog(">> YOLOX Ready (GPU Forced)")
         } catch (e: Exception) {
             addLog("YOLOX Init Error: ${e.message}")
         }
