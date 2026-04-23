@@ -94,6 +94,7 @@ class BodyChangerFragment : Fragment() {
     private var rvmInputArr: FloatArray? = null
     private var rvmNchwFloatArray: FloatArray? = null
     private var rvmOutputFloatArray: FloatArray? = null
+    private var yoloxFloatArray: FloatArray? = null
 
     private var yolactOutputBoxes: ByteBuffer? = null
     private var yolactOutputScores: ByteBuffer? = null
@@ -325,6 +326,7 @@ class BodyChangerFragment : Fragment() {
             rvmInputArr = null
             rvmNchwFloatArray = null
             rvmOutputFloatArray = null
+            yoloxFloatArray = null
             for (i in 0..3) { rvmStateBuffers[i][0] = null; rvmStateBuffers[i][1] = null }
         } catch (e: Exception) {}
     }
@@ -690,16 +692,27 @@ class BodyChangerFragment : Fragment() {
         val targetW = if (selectedModel == "RVM 720x1280") 1280 else 320
         val targetH = if (selectedModel == "RVM 720x1280") 720 else 192
 
-        if (rtspBitmapBuffer == null || rtspBitmapBuffer!!.width != targetW) {
-            rtspBitmapBuffer = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+        val frame = synchronized(segmenterLock) {
+            if (rtspBitmapBuffer == null || rtspBitmapBuffer!!.width != targetW) {
+                rtspBitmapBuffer?.recycle()
+                rtspBitmapBuffer = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+            }
+
+            val buffer = rtspBitmapBuffer
+            if (buffer != null && !buffer.isRecycled) {
+                try {
+                    textureView.getBitmap(buffer)
+                    buffer.copy(Bitmap.Config.ARGB_8888, false)
+                } catch (e: Exception) {
+                    Log.e(tagStr, "getBitmap failed", e)
+                    null
+                }
+            } else null
         }
 
-        try {
-            textureView.getBitmap(rtspBitmapBuffer!!)
-            val frame = rtspBitmapBuffer!!.copy(Bitmap.Config.ARGB_8888, false)
+        if (frame != null) {
             processFrameBitmap(frame)
-        } catch (e: Exception) {
-            Log.e(tagStr, "getBitmap failed", e)
+        } else {
             isProcessing.set(false)
         }
     }
@@ -816,7 +829,7 @@ class BodyChangerFragment : Fragment() {
         yolactOutputBoxes?.clear(); yolactOutputScores?.clear(); yolactOutputCoeffs?.clear(); yolactOutputProtos?.clear()
         val outputs = mapOf(yolactIdxBoxes to yolactOutputBoxes!!, yolactIdxScores to yolactOutputScores!!, yolactIdxCoeffs to yolactOutputCoeffs!!, yolactIdxProtos to yolactOutputProtos!!)
         try { interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs) } catch (e: Exception) { bitmap.recycle(); isProcessing.set(false); return }
-        yolactOutputScores?.rewind(); val scoresArray = reusableScoresArray ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+        yolactOutputScores?.rewind(); val scoresArray = reusableScoresArray ?: run { bitmap.recycle(); isProcessing.set(false); return }
         yolactOutputScores?.asFloatBuffer()?.get(scoresArray)
         var bestIdx = -1; var maxScore = 0f
         for (i in 0 until 19248) { val score = scoresArray[i * 81 + 1]; if (score > maxScore) { maxScore = score; bestIdx = i } }
@@ -900,23 +913,27 @@ class BodyChangerFragment : Fragment() {
         }
 
         yoloxOutputBuffer?.rewind()
-        val yoloxFb = yoloxOutputBuffer?.asFloatBuffer() ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+        val yoloxFb = yoloxOutputBuffer?.asFloatBuffer() ?: run { bitmap.recycle(); isProcessing.set(false); return }
+
+        val yLen = yoloxFb.remaining()
+        val yArr = yoloxFloatArray ?: FloatArray(yLen).also { yoloxFloatArray = it }
+        yoloxFb.get(yArr)
 
         var maxScore = 0f
         var bestBox = RectF(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat())
-        val numAnchors = yoloxFb.remaining() / 85
+        val numAnchors = yLen / 85
 
         for (i in 0 until numAnchors) {
-            val objScore = yoloxFb.get(i * 85 + 4)
+            val objScore = yArr[i * 85 + 4]
             if (objScore > 0.4f) {
-                val classScore = yoloxFb.get(i * 85 + 5)
+                val classScore = yArr[i * 85 + 5]
                 val totalScore = objScore * classScore
                 if (totalScore > maxScore) {
                     maxScore = totalScore
-                    val cx = yoloxFb.get(i * 85 + 0)
-                    val cy = yoloxFb.get(i * 85 + 1)
-                    val w = yoloxFb.get(i * 85 + 2)
-                    val h = yoloxFb.get(i * 85 + 3)
+                    val cx = yArr[i * 85 + 0]
+                    val cy = yArr[i * 85 + 1]
+                    val w = yArr[i * 85 + 2]
+                    val h = yArr[i * 85 + 3]
 
                     val normCx = if (cx > 2f) cx / yoloxW else cx
                     val normCy = if (cy > 2f) cy / yoloxH else cy
@@ -933,12 +950,12 @@ class BodyChangerFragment : Fragment() {
             }
         }
 
-        val tImage = rvmTensorImage ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+        val tImage = rvmTensorImage ?: run { bitmap.recycle(); isProcessing.set(false); return }
         tImage.load(bitmap)
-        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: run { bitmap.recycle(); isProcessing.set(false); return }
 
-        val inputs = rvmInputs ?: return.also { bitmap.recycle(); isProcessing.set(false) }
-        val outputs = rvmOutputs ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+        val inputs = rvmInputs ?: run { bitmap.recycle(); isProcessing.set(false); return }
+        val outputs = rvmOutputs ?: run { bitmap.recycle(); isProcessing.set(false); return }
 
         if (isRvmNCHW) {
             val nchw = rvmNchwBuffer ?: ByteBuffer.allocateDirect(1 * 3 * rvmW * rvmH * 4).order(ByteOrder.nativeOrder()).also { rvmNchwBuffer = it }
@@ -948,12 +965,25 @@ class BodyChangerFragment : Fragment() {
             val inputArr = rvmInputArr ?: FloatArray(totalPixels * 3).also { rvmInputArr = it }
             fbIn.get(inputArr)
 
-            val nchwFb = nchw.asFloatBuffer()
-            for (c in 0 until 3) {
-                for (i in 0 until totalPixels) {
-                    nchwFb.put(inputArr[i * 3 + c])
-                }
+            val nchwArr = rvmNchwFloatArray ?: FloatArray(totalPixels * 3).also { rvmNchwFloatArray = it }
+            val numCores = Runtime.getRuntime().availableProcessors()
+            val chunkSize = totalPixels / numCores
+
+            runBlocking {
+                (0 until numCores).map { coreIdx ->
+                    launch(Dispatchers.Default) {
+                        val start = coreIdx * chunkSize
+                        val end = if (coreIdx == numCores - 1) totalPixels else (coreIdx + 1) * chunkSize
+                        for (i in start until end) {
+                            val pixelIdx = i * 3
+                            nchwArr[i] = inputArr[pixelIdx]
+                            nchwArr[totalPixels + i] = inputArr[pixelIdx + 1]
+                            nchwArr[totalPixels * 2 + i] = inputArr[pixelIdx + 2]
+                        }
+                    }
+                }.forEach { it.join() }
             }
+            nchw.asFloatBuffer().put(nchwArr)
             nchw.rewind()
             inputs[rvmIdxSrc] = nchw
         } else {
@@ -985,7 +1015,7 @@ class BodyChangerFragment : Fragment() {
         }
 
         rvmOutputPha?.rewind()
-        val rvmFb = rvmOutputPha?.asFloatBuffer() ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+        val rvmFb = rvmOutputPha?.asFloatBuffer() ?: run { bitmap.recycle(); isProcessing.set(false); return }
 
         val count = rvmH * rvmW
         val byteArr = ByteArray(count)
@@ -1042,9 +1072,9 @@ class BodyChangerFragment : Fragment() {
             return
         }
 
-        val tImage = rvmTensorImage ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+        val tImage = rvmTensorImage ?: run { bitmap.recycle(); isProcessing.set(false); return }
         tImage.load(bitmap)
-        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: run { bitmap.recycle(); isProcessing.set(false); return }
 
         val totalPixels = rvmW * rvmH
         if (isRvmNCHW) {
@@ -1109,7 +1139,7 @@ class BodyChangerFragment : Fragment() {
         }
 
         rvmOutputPha?.rewind()
-        val fbOut = rvmOutputPha?.asFloatBuffer() ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+        val fbOut = rvmOutputPha?.asFloatBuffer() ?: run { bitmap.recycle(); isProcessing.set(false); return }
         val outArr = rvmOutputFloatArray ?: FloatArray(totalPixels).also { rvmOutputFloatArray = it }
         fbOut.get(outArr)
 
@@ -1142,6 +1172,7 @@ class BodyChangerFragment : Fragment() {
 
         activity?.runOnUiThread {
             _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode)
+            if (finalMask != mask) finalMask.recycle()
             isProcessing.set(false)
         }
     }
