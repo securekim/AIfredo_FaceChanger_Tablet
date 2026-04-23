@@ -105,9 +105,10 @@ class SettingsFragment : Fragment() {
             "MediaPipe Pose" -> binding.radioBodyMediapipePose.isChecked = true
             "ML Kit" -> binding.radioBodyMlkit.isChecked = true
             "YOLACT" -> binding.radioBodyYolact.isChecked = true
-            "YOLOX" -> binding.radioBodyYolox.isChecked = true
+            "YOLOX + RVM" -> binding.radioBodyYolox.isChecked = true
             "MODNet" -> binding.radioBodyModnet.isChecked = true
-            "RVM" -> binding.radioBodyRvm.isChecked = true
+            "RVM 192x320" -> binding.radioBodyRvm320.isChecked = true
+            "RVM 720x1280" -> binding.radioBodyRvm1280.isChecked = true
             else -> binding.radioBodyMediapipePose.isChecked = true
         }
 
@@ -116,9 +117,10 @@ class SettingsFragment : Fragment() {
                 R.id.radio_body_mediapipe_pose -> "MediaPipe Pose"
                 R.id.radio_body_mlkit -> "ML Kit"
                 R.id.radio_body_yolact -> "YOLACT"
-                R.id.radio_body_yolox -> "YOLOX"
+                R.id.radio_body_yolox -> "YOLOX + RVM"
                 R.id.radio_body_modnet -> "MODNet"
-                R.id.radio_body_rvm -> "RVM"
+                R.id.radio_body_rvm_320 -> "RVM 192x320"
+                R.id.radio_body_rvm_1280 -> "RVM 720x1280"
                 else -> "MediaPipe Pose"
             }
             sharedPref.edit().putString("body_model", selected).apply()

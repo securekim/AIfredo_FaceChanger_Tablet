@@ -242,7 +242,7 @@
                         android:id="@+id/radio_body_yolox"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="YOLOX\n(Framework: TFLite, Backbone: YOLOX, Model: Float16, Res: 128x160)" />
+                        android:text="YOLOX + RVM\n(Detection + Segmentation)" />
 
                     <RadioButton
                         android:id="@+id/radio_body_modnet"
@@ -251,10 +251,16 @@
                         android:text="MODNet\n(Framework: TFLite, Backbone: MODNet, Model: Float16, Res: 256x256)" />
 
                     <RadioButton
-                        android:id="@+id/radio_body_rvm"
+                        android:id="@+id/radio_body_rvm_320"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="RVM\n(Framework: TFLite, Backbone: ResNet-50, Model: Float16, Res: 192x320)" />
+                        android:text="RVM 192x320\n(Framework: TFLite, Backbone: ResNet-50, Model: Float16)" />
+
+                    <RadioButton
+                        android:id="@+id/radio_body_rvm_1280"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="RVM 720x1280\n(Framework: TFLite, Backbone: ResNet-50, Model: Float16)" />
                 </RadioGroup>
 
                 <TextView

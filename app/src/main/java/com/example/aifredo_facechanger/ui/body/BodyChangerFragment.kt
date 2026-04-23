@@ -75,12 +75,8 @@ class BodyChangerFragment : Fragment() {
 
     private var yolactImageProcessor: ImageProcessor? = null
     private var modnetImageProcessor: ImageProcessor? = null
-    private var rvmImageProcessor: ImageProcessor? = null
-    private var yoloxImageProcessor: ImageProcessor? = null
     private var yolactTensorImage: TensorImage? = null
     private var modnetTensorImage: TensorImage? = null
-    private var rvmTensorImage: TensorImage? = null
-    private var yoloxTensorImage: TensorImage? = null
 
     private var yolactOutputBoxes: ByteBuffer? = null
     private var yolactOutputScores: ByteBuffer? = null
@@ -105,6 +101,8 @@ class BodyChangerFragment : Fragment() {
 
     private var rvmH: Int = 192
     private var rvmW: Int = 320
+    private var yoloxW: Int = 320
+    private var yoloxH: Int = 256
     private var rvmIdxSrc = -1
     private var rvmIdxR1i = -1; private var rvmIdxR2i = -1; private var rvmIdxR3i = -1; private var rvmIdxR4i = -1
     private var rvmIdxRatio = -1
@@ -136,7 +134,7 @@ class BodyChangerFragment : Fragment() {
 
     private val yolactModelFile = "yolact_550x550_model_float16_quant.tflite"
     private val modnetModelFile = "MODNet_256x256_model_float16_quant.tflite"
-    private val rvmModelFile = "rvm_resnet50_192x320_model_float16_quant.tflite"
+    private var rvmModelFile = "rvm_resnet50_192x320_model_float16_quant.tflite"
     private val yoloxModelFile = "yolox_n_body_head_hand_post_0461_0.4428_1x3x256x320_float16.tflite"
 
     private var exoPlayer: ExoPlayer? = null
@@ -204,6 +202,13 @@ class BodyChangerFragment : Fragment() {
             startColor = Color.RED
             endColor = Color.BLUE
         }
+
+        // RVM 모델 파일 및 해상도 설정 동적 변경
+        if (selectedModel == "RVM 720x1280") {
+            rvmModelFile = "rvm_resnet50_720x1280_model_float16_quant.tflite"
+        } else {
+            rvmModelFile = "rvm_resnet50_192x320_model_float16_quant.tflite"
+        }
     }
 
     private fun setupSegmenter() {
@@ -219,9 +224,12 @@ class BodyChangerFragment : Fragment() {
                     when (selectedModel) {
                         "MediaPipe Pose" -> initMediaPipePose()
                         "YOLACT" -> initYolact()
-                        "YOLOX" -> initYolox()
+                        "YOLOX + RVM" -> {
+                            initYolox()
+                            initRvm()
+                        }
                         "MODNet" -> initModNet()
-                        "RVM" -> initRvm()
+                        "RVM 192x320", "RVM 720x1280", "RVM" -> initRvm()
                         "ML Kit" -> initMlKit()
                         else -> initMediaPipePose()
                     }
@@ -248,6 +256,31 @@ class BodyChangerFragment : Fragment() {
             rvmOutputs = null
             for (i in 0..3) { rvmStateBuffers[i][0] = null; rvmStateBuffers[i][1] = null }
         } catch (e: Exception) {}
+    }
+
+    private fun convertBitmapToByteBuffer(bitmap: Bitmap, width: Int, height: Int, isNchw: Boolean): ByteBuffer {
+        val scaled = if (bitmap.width != width || bitmap.height != height) {
+            Bitmap.createScaledBitmap(bitmap, width, height, true)
+        } else bitmap
+
+        val buffer = ByteBuffer.allocateDirect(1 * 3 * width * height * 4).order(ByteOrder.nativeOrder())
+        val pixels = IntArray(width * height)
+        scaled.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        if (isNchw) {
+            for (i in pixels.indices) buffer.putFloat(((pixels[i] shr 16) and 0xFF) / 255f)
+            for (i in pixels.indices) buffer.putFloat(((pixels[i] shr 8) and 0xFF) / 255f)
+            for (i in pixels.indices) buffer.putFloat((pixels[i] and 0xFF) / 255f)
+        } else {
+            for (i in pixels.indices) {
+                buffer.putFloat(((pixels[i] shr 16) and 0xFF) / 255f)
+                buffer.putFloat(((pixels[i] shr 8) and 0xFF) / 255f)
+                buffer.putFloat((pixels[i] and 0xFF) / 255f)
+            }
+        }
+        if (scaled != bitmap) scaled.recycle()
+        buffer.rewind()
+        return buffer
     }
 
     private fun initMediaPipePose() {
@@ -310,7 +343,7 @@ class BodyChangerFragment : Fragment() {
     }
 
     private fun initMlKit() {
-        actualDelegate = "N/A (ML Kit)"
+        actualDelegate = "N/A"
         try {
             val options = SelfieSegmenterOptions.Builder().setDetectorMode(SelfieSegmenterOptions.STREAM_MODE).build()
             mlKitSegmenter = Segmentation.getClient(options)
@@ -376,25 +409,13 @@ class BodyChangerFragment : Fragment() {
     private fun initYolox() {
         try {
             yoloxInterpreter = Interpreter(FileUtil.loadMappedFile(requireContext(), yoloxModelFile), getInterpreterOptions())
-            
-            // 하드코딩 대신 모델의 실제 입력 텐서 크기를 읽어와서 세팅합니다.
             val inputShape = yoloxInterpreter!!.getInputTensor(0).shape()
-            
-            // 모델명이 1x3x256x320 이므로 NCHW 구조일 확률이 높습니다.
-            // NCHW일 경우 shape[2]가 Height, shape[3]이 Width 입니다.
-            val modelHeight = if (inputShape[1] == 3) inputShape[2] else inputShape[1]
-            val modelWidth = if (inputShape[1] == 3) inputShape[3] else inputShape[2]
-
-            yoloxImageProcessor = ImageProcessor.Builder()
-                .add(ResizeOp(modelHeight, modelWidth, ResizeOp.ResizeMethod.BILINEAR))
-                .add(NormalizeOp(0f, 255f))
-                .build()
-                
-            yoloxTensorImage = TensorImage(DataType.FLOAT32)
+            yoloxH = if (inputShape[1] == 3) inputShape[2] else inputShape[1]
+            yoloxW = if (inputShape[1] == 3) inputShape[3] else inputShape[2]
             yoloxOutputBuffer = ByteBuffer.allocateDirect(yoloxInterpreter!!.getOutputTensor(0).numBytes()).order(ByteOrder.nativeOrder())
             addLog(">> YOLOX Ready ($actualDelegate)")
-        } catch (e: Exception) { 
-            addLog("YOLOX Init Error: ${e.message}") 
+        } catch (e: Exception) {
+            addLog("YOLOX Init Error: ${e.message}")
         }
     }
 
@@ -407,41 +428,31 @@ class BodyChangerFragment : Fragment() {
             rvmIdxSrc = -1; rvmIdxRatio = -1
             rvmIdxFgr = -1; rvmIdxPha = -1
 
-            // ====================================================================
-            // [해결책] 형태(Shape) 기반 텐서 매핑 (이름, 하드코딩 순서 의존 탈피)
-            // ====================================================================
-
-            // 1. 입력 텐서 매핑
-            val inputStates = mutableListOf<Pair<Int, Int>>() // <Index, TotalElements>
+            val inputStates = mutableListOf<Pair<Int, Int>>()
             for (i in 0 until rvmInterpreter!!.inputTensorCount) {
                 val shape = rvmInterpreter!!.getInputTensor(i).shape()
                 if (shape.size == 4) {
-                    // RGB 이미지는 채널이 3입니다. (NCHW 또는 NHWC 대응)
                     if (shape[1] == 3 || shape[3] == 3) {
                         rvmIdxSrc = i
                     } else {
-                        // 3채널이 아닌 4D 텐서는 무조건 r1i ~ r4i 상태 텐서입니다.
                         val spatialSize = shape[1] * shape[2] * shape[3]
                         inputStates.add(Pair(i, spatialSize))
                     }
                 } else if (shape.size == 1) {
-                    rvmIdxRatio = i // 1D 텐서는 ratio 뿐입니다.
+                    rvmIdxRatio = i
                 }
             }
 
-            // 상태 텐서들을 공간 크기(해상도)가 큰 순서대로 내림차순 정렬하면 정확히 r1, r2, r3, r4 순서가 됩니다.
             inputStates.sortByDescending { it.second }
             rvmIdxR1i = inputStates.getOrNull(0)?.first ?: -1
             rvmIdxR2i = inputStates.getOrNull(1)?.first ?: -1
             rvmIdxR3i = inputStates.getOrNull(2)?.first ?: -1
             rvmIdxR4i = inputStates.getOrNull(3)?.first ?: -1
 
-            // 2. 출력 텐서 매핑
             val outputStates = mutableListOf<Pair<Int, Int>>()
             for (i in 0 until rvmInterpreter!!.outputTensorCount) {
                 val shape = rvmInterpreter!!.getOutputTensor(i).shape()
                 if (shape.size == 4) {
-                    // 채널이 1개면 pha (알파 마스크), 3개면 fgr (전경)
                     val isPha = (shape[1] == 1 || shape[3] == 1)
                     val isFgr = (shape[1] == 3 || shape[3] == 3)
 
@@ -457,9 +468,8 @@ class BodyChangerFragment : Fragment() {
             rvmIdxR3o = outputStates.getOrNull(2)?.first ?: -1
             rvmIdxR4o = outputStates.getOrNull(3)?.first ?: -1
 
-            // 3. 해상도 동적 분석
             if (rvmIdxSrc == -1) {
-                addLog("RVM Init Error: 이미지 입력 텐서를 찾을 수 없습니다.")
+                addLog("RVM Init Error: 입력 텐서를 찾을 수 없습니다.")
                 return
             }
 
@@ -467,13 +477,6 @@ class BodyChangerFragment : Fragment() {
             isRvmNCHW = srcShape[1] == 3
             if (isRvmNCHW) { rvmH = srcShape[2]; rvmW = srcShape[3] } else { rvmH = srcShape[1]; rvmW = srcShape[2] }
 
-            rvmImageProcessor = ImageProcessor.Builder()
-                .add(ResizeOp(rvmH, rvmW, ResizeOp.ResizeMethod.BILINEAR))
-                .add(NormalizeOp(0f, 255f))
-                .build()
-            rvmTensorImage = TensorImage(DataType.FLOAT32)
-
-            // 4. 버퍼 할당 및 바인딩 (이제 각 인덱스가 정확하므로 numBytes()를 100% 신뢰할 수 있습니다)
             rvmStateToggle = 0
             val statesIn = intArrayOf(rvmIdxR1i, rvmIdxR2i, rvmIdxR3i, rvmIdxR4i)
 
@@ -498,7 +501,6 @@ class BodyChangerFragment : Fragment() {
                 rvmInputs!![rvmIdxRatio] = rvmRatioBuffer!!
             }
 
-            // 출력 버퍼
             if (rvmIdxFgr != -1) rvmOutputFgr = ByteBuffer.allocateDirect(rvmInterpreter!!.getOutputTensor(rvmIdxFgr).numBytes()).order(ByteOrder.nativeOrder())
             if (rvmIdxPha != -1) rvmOutputPha = ByteBuffer.allocateDirect(rvmInterpreter!!.getOutputTensor(rvmIdxPha).numBytes()).order(ByteOrder.nativeOrder())
 
@@ -526,16 +528,23 @@ class BodyChangerFragment : Fragment() {
         cameraProviderFuture.addListener({
             val cameraProvider = try { cameraProviderFuture.get() } catch (e: Exception) { return@addListener }
 
+            // 해상도 동적 설정 (RVM 720x1280일 경우 고해상도 요청)
+            val targetSize = if (selectedModel == "RVM 720x1280") {
+                Size(1280, 720)
+            } else {
+                Size(320, 192)
+            }
+
             val imageAnalyzer = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                .setTargetResolution(Size(320, 192))
+                .setTargetResolution(targetSize)
                 .build().also { it.setAnalyzer(cameraExecutor!!) { proxy -> processFrame(proxy) } }
 
             try {
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(viewLifecycleOwner, CameraSelector.DEFAULT_FRONT_CAMERA, imageAnalyzer)
-                addLog("Camera started")
+                addLog("Camera started with ${targetSize.width}x${targetSize.height}")
             } catch (e: Exception) {
                 Log.e(tagStr, "Camera binding failed", e)
             }
@@ -579,7 +588,9 @@ class BodyChangerFragment : Fragment() {
         val textureView = b.playerView.videoSurfaceView as? TextureView ?: return
 
         if (rtspBitmapBuffer == null) {
-            rtspBitmapBuffer = Bitmap.createBitmap(320, 192, Bitmap.Config.ARGB_8888)
+            val targetW = if (selectedModel == "RVM 720x1280") 1280 else 320
+            val targetH = if (selectedModel == "RVM 720x1280") 720 else 192
+            rtspBitmapBuffer = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
         }
 
         try {
@@ -653,9 +664,9 @@ class BodyChangerFragment : Fragment() {
                     isProcessing.set(false)
                 }
                 "YOLACT" -> processYolact(bitmap)
-                "YOLOX" -> processYolox(bitmap)
+                "YOLOX + RVM" -> processYoloxHybrid(bitmap)
                 "MODNet" -> processModNet(bitmap)
-                "RVM" -> processRvm(bitmap)
+                "RVM 192x320", "RVM 720x1280", "RVM" -> processRvm(bitmap)
                 "ML Kit" -> processMlKit(bitmap)
                 else -> {
                     bitmap.recycle()
@@ -772,58 +783,137 @@ class BodyChangerFragment : Fragment() {
         }
     }
 
-    private fun processYolox(bitmap: Bitmap) {
-        val interpreter = yoloxInterpreter
-        val tImage = yoloxTensorImage
-        if (interpreter == null || tImage == null) {
+    private fun processYoloxHybrid(bitmap: Bitmap) {
+        val yolox = yoloxInterpreter
+        val rvm = rvmInterpreter
+        if (yolox == null || rvm == null) {
             bitmap.recycle()
             isProcessing.set(false)
             return
         }
-        tImage.load(bitmap)
-        val inputBuffer = yoloxImageProcessor?.process(tImage)?.buffer
-        if (inputBuffer == null) {
-            bitmap.recycle()
-            isProcessing.set(false)
-            return
-        }
+
+        val yoloxInput = convertBitmapToByteBuffer(bitmap, yoloxW, yoloxH, true)
         yoloxOutputBuffer?.clear()
         try {
-            interpreter.run(inputBuffer, yoloxOutputBuffer)
+            yolox.run(yoloxInput, yoloxOutputBuffer)
         } catch (e: Exception) {
-            Log.e(tagStr, "YOLOX Inference Error", e)
-            bitmap.recycle()
-            isProcessing.set(false)
-            return
+            Log.e(tagStr, "YOLOX Error", e)
+            bitmap.recycle(); isProcessing.set(false); return
         }
-        yoloxOutputBuffer?.rewind()
 
-        // NOTE: YOLOX는 객체 탐지 모델이므로 픽셀 단위 마스크를 출력하지 않습니다.
-        // 바운딩 박스 파싱 로직이 필요하며, 기존의 마스크 처리 로직은 논리적으로 부적절하여 제거되었습니다.
-        
-        bitmap.recycle()
-        isProcessing.set(false)
+        yoloxOutputBuffer?.rewind()
+        val yoloxFb = yoloxOutputBuffer?.asFloatBuffer() ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+
+        var maxScore = 0f
+        var bestBox = RectF(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat())
+        val numAnchors = yoloxFb.remaining() / 85
+
+        for (i in 0 until numAnchors) {
+            val objScore = yoloxFb.get(i * 85 + 4)
+            if (objScore > 0.4f) {
+                val classScore = yoloxFb.get(i * 85 + 5)
+                val totalScore = objScore * classScore
+                if (totalScore > maxScore) {
+                    maxScore = totalScore
+                    val cx = yoloxFb.get(i * 85 + 0)
+                    val cy = yoloxFb.get(i * 85 + 1)
+                    val w = yoloxFb.get(i * 85 + 2)
+                    val h = yoloxFb.get(i * 85 + 3)
+                    bestBox = RectF(
+                        (cx - w / 2) / yoloxW * bitmap.width,
+                        (cy - h / 2) / yoloxH * bitmap.height,
+                        (cx + w / 2) / yoloxW * bitmap.width,
+                        (cy + h / 2) / yoloxH * bitmap.height
+                    )
+                }
+            }
+        }
+
+        val rvmInput = convertBitmapToByteBuffer(bitmap, rvmW, rvmH, isRvmNCHW)
+        val inputs = rvmInputs ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+        val outputs = rvmOutputs ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+
+        inputs[rvmIdxSrc] = rvmInput
+        val nextToggle = 1 - rvmStateToggle
+
+        if (rvmIdxR1i != -1) { inputs[rvmIdxR1i] = rvmStateBuffers[0][rvmStateToggle]!!; rvmStateBuffers[0][rvmStateToggle]?.rewind() }
+        if (rvmIdxR2i != -1) { inputs[rvmIdxR2i] = rvmStateBuffers[1][rvmStateToggle]!!; rvmStateBuffers[1][rvmStateToggle]?.rewind() }
+        if (rvmIdxR3i != -1) { inputs[rvmIdxR3i] = rvmStateBuffers[2][rvmStateToggle]!!; rvmStateBuffers[2][rvmStateToggle]?.rewind() }
+        if (rvmIdxR4i != -1) { inputs[rvmIdxR4i] = rvmStateBuffers[3][rvmStateToggle]!!; rvmStateBuffers[3][rvmStateToggle]?.rewind() }
+        if (rvmIdxRatio != -1) rvmRatioBuffer?.rewind()
+
+        outputs.clear()
+        if (rvmIdxR1o != -1) { outputs[rvmIdxR1o] = rvmStateBuffers[0][nextToggle]!!; rvmStateBuffers[0][nextToggle]?.clear() }
+        if (rvmIdxR2o != -1) { outputs[rvmIdxR2o] = rvmStateBuffers[1][nextToggle]!!; rvmStateBuffers[1][nextToggle]?.clear() }
+        if (rvmIdxR3o != -1) { outputs[rvmIdxR3o] = rvmStateBuffers[2][nextToggle]!!; rvmStateBuffers[2][nextToggle]?.clear() }
+        if (rvmIdxR4o != -1) { outputs[rvmIdxR4o] = rvmStateBuffers[3][nextToggle]!!; rvmStateBuffers[3][nextToggle]?.clear() }
+        if (rvmIdxFgr != -1) { outputs[rvmIdxFgr] = rvmOutputFgr!!; rvmOutputFgr?.clear() }
+        if (rvmIdxPha != -1) { outputs[rvmIdxPha] = rvmOutputPha!!; rvmOutputPha?.clear() }
+
+        try {
+            rvm.runForMultipleInputsOutputs(inputs, outputs)
+            rvmStateToggle = nextToggle
+        } catch (e: Exception) {
+            Log.e(tagStr, "RVM Error", e)
+            bitmap.recycle(); isProcessing.set(false); return
+        }
+
+        rvmOutputPha?.rewind()
+        val rvmFb = rvmOutputPha?.asFloatBuffer() ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+
+        val count = rvmH * rvmW
+        val byteArr = ByteArray(count)
+
+        val rvmBox = RectF(
+            bestBox.left / bitmap.width * rvmW,
+            bestBox.top / bitmap.height * rvmH,
+            bestBox.right / bitmap.width * rvmW,
+            bestBox.bottom / bitmap.height * rvmH
+        )
+
+        for (y in 0 until rvmH) {
+            for (x in 0 until rvmW) {
+                val idx = y * rvmW + x
+                val inBox = x >= rvmBox.left && x <= rvmBox.right && y >= rvmBox.top && y <= rvmBox.bottom
+                if (inBox && rvmFb.get(idx) > 0.5f) {
+                    byteArr[idx] = 255.toByte()
+                } else {
+                    byteArr[idx] = 0
+                }
+            }
+        }
+
+        val pixels = reusableMaskPixels!!
+        pixels.clear()
+        pixels.put(byteArr)
+        pixels.rewind()
+
+        val mask = rvmMaskBitmap!!
+        mask.copyPixelsFromBuffer(pixels)
+
+        val finalMask = if (mask.width != bitmap.width || mask.height != bitmap.height) {
+            Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true)
+        } else mask
+
+        activity?.runOnUiThread {
+            _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode)
+            if (finalMask != mask) finalMask.recycle()
+            isProcessing.set(false)
+        }
     }
 
     private fun processRvm(bitmap: Bitmap) {
         val interpreter = rvmInterpreter
-        val tImage = rvmTensorImage
         val inputs = rvmInputs
         val outputs = rvmOutputs
 
-        if (interpreter == null || tImage == null || inputs == null || outputs == null || rvmIdxSrc == -1) {
+        if (interpreter == null || inputs == null || outputs == null || rvmIdxSrc == -1) {
             bitmap.recycle()
             isProcessing.set(false)
             return
         }
 
-        tImage.load(bitmap)
-        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer
-        if (inputBuffer == null) {
-            bitmap.recycle()
-            isProcessing.set(false)
-            return
-        }
+        val inputBuffer = convertBitmapToByteBuffer(bitmap, rvmW, rvmH, isRvmNCHW)
 
         inputs[rvmIdxSrc] = inputBuffer
         (inputs[rvmIdxSrc] as ByteBuffer).rewind()
@@ -836,15 +926,6 @@ class BodyChangerFragment : Fragment() {
         if (rvmIdxR4i != -1) { inputs[rvmIdxR4i] = rvmStateBuffers[3][rvmStateToggle]!!; rvmStateBuffers[3][rvmStateToggle]?.rewind() }
 
         if (rvmIdxRatio != -1) rvmRatioBuffer?.rewind()
-
-        for (i in inputs.indices) {
-            if (inputs[i] == null) {
-                Log.e(tagStr, "RVM 입력 텐서 ${i}번이 null입니다.")
-                bitmap.recycle()
-                isProcessing.set(false)
-                return
-            }
-        }
 
         outputs.clear()
 
@@ -860,33 +941,20 @@ class BodyChangerFragment : Fragment() {
             interpreter.runForMultipleInputsOutputs(inputs, outputs)
             rvmStateToggle = nextToggle
         } catch (e: Exception) {
-            Log.e(tagStr, "RVM 추론 중 예외 발생: ${e.message}", e)
-            bitmap.recycle()
-            isProcessing.set(false)
-            return
-        }
-
-        if (rvmOutputPha == null) {
+            Log.e(tagStr, "RVM Inference Error", e)
             bitmap.recycle()
             isProcessing.set(false)
             return
         }
 
         rvmOutputPha?.rewind()
-        val fb = rvmOutputPha?.asFloatBuffer()
-        if (fb == null) {
-            bitmap.recycle()
-            isProcessing.set(false)
-            return
-        }
+        val fb = rvmOutputPha?.asFloatBuffer() ?: return.also { bitmap.recycle(); isProcessing.set(false) }
 
         val count = rvmH * rvmW
-        val floatArr = rvmFloatArray!!
         val byteArr = rvmByteArray!!
 
-        fb.get(floatArr)
         for (i in 0 until count) {
-            byteArr[i] = (if (floatArr[i] > 0.5f) 255 else 0).toByte()
+            byteArr[i] = (if (fb.get() > 0.5f) 255 else 0).toByte()
         }
 
         val pixels = reusableMaskPixels!!
