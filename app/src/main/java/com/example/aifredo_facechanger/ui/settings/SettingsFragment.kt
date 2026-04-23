@@ -105,6 +105,7 @@ class SettingsFragment : Fragment() {
             "MediaPipe Pose" -> binding.radioBodyMediapipePose.isChecked = true
             "ML Kit" -> binding.radioBodyMlkit.isChecked = true
             "YOLACT" -> binding.radioBodyYolact.isChecked = true
+            "yolo26n-seg" -> binding.radioBodyYolo26nSeg.isChecked = true
             "YOLOX + RVM" -> binding.radioBodyYolox.isChecked = true
             "YOLOX tiny" -> binding.radioBodyYoloxTiny.isChecked = true
             "MODNet" -> binding.radioBodyModnet.isChecked = true
@@ -118,6 +119,7 @@ class SettingsFragment : Fragment() {
                 R.id.radio_body_mediapipe_pose -> "MediaPipe Pose"
                 R.id.radio_body_mlkit -> "ML Kit"
                 R.id.radio_body_yolact -> "YOLACT"
+                R.id.radio_body_yolo26n_seg -> "yolo26n-seg"
                 R.id.radio_body_yolox -> "YOLOX + RVM"
                 R.id.radio_body_yolox_tiny -> "YOLOX tiny"
                 R.id.radio_body_modnet -> "MODNet"

@@ -32,6 +32,7 @@
     <string name="settings_body_delegate">Segmentation Delegate</string>
     <string name="settings_body_gradient_start_color">Gradient Start Color</string>
     <string name="settings_body_gradient_end_color">Gradient End Color</string>
+    <string name="settings_body_model_yolo26n">yolo26n-seg\n(Framework: TFLite, Model: Float16, Res: 640x640)</string>
 
     <string name="settings_cam_source">Camera Source</string>
     <string name="settings_cam_embedded">Embedded Camera</string>

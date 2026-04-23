@@ -65,6 +65,7 @@ import com.google.mediapipe.framework.image.BitmapImageBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlin.math.exp
 
 class BodyChangerFragment : Fragment() {
 
@@ -77,6 +78,7 @@ class BodyChangerFragment : Fragment() {
     private var mlKitSegmenter: Segmenter? = null
     @Volatile private var poseLandmarker: PoseLandmarker? = null
     @Volatile private var yolactInterpreter: Interpreter? = null
+    @Volatile private var yolo26nInterpreter: Interpreter? = null
     @Volatile private var modnetInterpreter: Interpreter? = null
     @Volatile private var rvmInterpreter: Interpreter? = null
     @Volatile private var yoloxInterpreter: Interpreter? = null
@@ -86,8 +88,10 @@ class BodyChangerFragment : Fragment() {
     private var nnApiDelegate: NnApiDelegate? = null
 
     private var yolactImageProcessor: ImageProcessor? = null
+    private var yolo26nImageProcessor: ImageProcessor? = null
     private var modnetImageProcessor: ImageProcessor? = null
     private var yolactTensorImage: TensorImage? = null
+    private var yolo26nTensorImage: TensorImage? = null
     private var modnetTensorImage: TensorImage? = null
 
     private var rvmImageProcessor: ImageProcessor? = null
@@ -102,6 +106,8 @@ class BodyChangerFragment : Fragment() {
     private var yolactOutputScores: ByteBuffer? = null
     private var yolactOutputCoeffs: ByteBuffer? = null
     private var yolactOutputProtos: ByteBuffer? = null
+    private var yolo26nOutput0: ByteBuffer? = null
+    private var yolo26nOutput1: ByteBuffer? = null
     private var modnetOutputBuffer: ByteBuffer? = null
     private var yoloxOutputBuffer: ByteBuffer? = null
 
@@ -156,6 +162,7 @@ class BodyChangerFragment : Fragment() {
     private val tagStr = "BodyChanger"
 
     private val yolactModelFile = "yolact_550x550_model_float16_quant.tflite"
+    private val yolo26nModelFile = "yolo26n-seg_float16.tflite"
     private val modnetModelFile = "MODNet_256x256_model_float16_quant.tflite"
     private var rvmModelFile = "rvm_resnet50_192x320_model_float16_quant.tflite"
     private val yoloxHybridModelFile = "yolox_n_body_head_hand_post_0461_0.4428_1x3x256x320_float16.tflite"
@@ -267,6 +274,7 @@ class BodyChangerFragment : Fragment() {
                     when (selectedModel) {
                         "MediaPipe Pose" -> initMediaPipePose()
                         "YOLACT" -> initYolact()
+                        "yolo26n-seg" -> initYolo26nSeg()
                         "YOLOX + RVM" -> {
                             initYolox(yoloxHybridModelFile)
                             initRvm()
@@ -316,6 +324,7 @@ class BodyChangerFragment : Fragment() {
             mlKitSegmenter?.close(); mlKitSegmenter = null
             poseLandmarker?.close(); poseLandmarker = null
             yolactInterpreter?.close(); yolactInterpreter = null
+            yolo26nInterpreter?.close(); yolo26nInterpreter = null
             modnetInterpreter?.close(); modnetInterpreter = null
             rvmInterpreter?.close(); rvmInterpreter = null
             yoloxInterpreter?.close(); yoloxInterpreter = null
@@ -503,6 +512,24 @@ class BodyChangerFragment : Fragment() {
             reusableScoresArray = FloatArray(19248 * 81)
             addLog(">> YOLACT Ready ($actualDelegate)")
         } catch (e: Exception) { addLog("YOLACT Init Error: ${e.message}") }
+    }
+
+    private fun initYolo26nSeg() {
+        try {
+            val interpreter = Interpreter(FileUtil.loadMappedFile(requireContext(), yolo26nModelFile), getInterpreterOptions())
+            yolo26nInterpreter = interpreter
+            yolo26nImageProcessor = ImageProcessor.Builder()
+                .add(ResizeOp(640, 640, ResizeOp.ResizeMethod.BILINEAR))
+                .add(NormalizeOp(0f, 255f))
+                .build()
+            yolo26nTensorImage = TensorImage(DataType.FLOAT32)
+            
+            yolo26nOutput0 = ByteBuffer.allocateDirect(interpreter.getOutputTensor(0).numBytes()).order(ByteOrder.nativeOrder())
+            yolo26nOutput1 = ByteBuffer.allocateDirect(interpreter.getOutputTensor(1).numBytes()).order(ByteOrder.nativeOrder())
+            
+            reusableMaskPixels = ByteBuffer.allocateDirect(640 * 640).order(ByteOrder.nativeOrder())
+            addLog(">> yolo26n-seg Ready ($actualDelegate)")
+        } catch (e: Exception) { addLog("yolo26n-seg Init Error: ${e.message}") }
     }
 
     private fun initModNet() {
@@ -838,6 +865,7 @@ class BodyChangerFragment : Fragment() {
                     isProcessing.set(false)
                 }
                 "YOLACT" -> processYolact(bitmap)
+                "yolo26n-seg" -> processYolo26nSeg(bitmap)
                 "YOLOX + RVM" -> processYoloxHybrid(bitmap)
                 "YOLOX tiny" -> processYoloxTiny(bitmap)
                 "MODNet" -> processModNet(bitmap)
@@ -911,6 +939,94 @@ class BodyChangerFragment : Fragment() {
             bitmap.recycle()
             isProcessing.set(false)
         }
+    }
+
+    private fun processYolo26nSeg(bitmap: Bitmap) {
+        val interpreter = yolo26nInterpreter
+        val tImage = yolo26nTensorImage
+        if (interpreter == null || tImage == null) {
+            bitmap.recycle()
+            isProcessing.set(false)
+            return
+        }
+        tImage.load(bitmap)
+        val inputBuffer = yolo26nImageProcessor?.process(tImage)?.buffer
+        if (inputBuffer == null) {
+            bitmap.recycle()
+            isProcessing.set(false)
+            return
+        }
+        yolo26nOutput0?.clear()
+        yolo26nOutput1?.clear()
+        val outputs = mapOf(0 to yolo26nOutput0!!, 1 to yolo26nOutput1!!)
+        try {
+            interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
+        } catch (e: Exception) {
+            bitmap.recycle()
+            isProcessing.set(false)
+            return
+        }
+
+        yolo26nOutput0?.rewind()
+        val fb0 = yolo26nOutput0?.asFloatBuffer() ?: return
+        // yolo26n-seg output0: [1, 116, 8400] -> Box(4) + Class(80) + Masks(32)
+        // Person class is index 0 in COCO, so index in output is 4 (after 4 box coords)
+        val numAnchors = 8400
+        val numFeatures = 116
+        val data = FloatArray(numFeatures * numAnchors)
+        fb0.get(data)
+
+        var maxScore = 0f
+        var bestIdx = -1
+        for (i in 0 until numAnchors) {
+            val score = data[4 * numAnchors + i] // Class 0 (Person)
+            if (score > maxScore) {
+                maxScore = score
+                bestIdx = i
+            }
+        }
+
+        if (bestIdx != -1 && maxScore > 0.25f) {
+            val coeffs = FloatArray(32)
+            for (i in 0 until 32) {
+                coeffs[i] = data[(84 + i) * numAnchors + bestIdx]
+            }
+            
+            yolo26nOutput1?.rewind()
+            val protosFb = yolo26nOutput1?.asFloatBuffer() ?: return
+            val protos = FloatArray(32 * 160 * 160)
+            protosFb.get(protos)
+            
+            val maskBitmap = generateYoloMask(coeffs, protos, 160, 160)
+            val finalMask = Bitmap.createScaledBitmap(maskBitmap, bitmap.width, bitmap.height, true)
+            maskBitmap.recycle()
+            
+            activity?.runOnUiThread {
+                _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode)
+                isProcessing.set(false)
+            }
+        } else {
+            bitmap.recycle()
+            isProcessing.set(false)
+        }
+    }
+
+    private fun generateYoloMask(coeffs: FloatArray, protos: FloatArray, maskW: Int, maskH: Int): Bitmap {
+        val pixels = ByteArray(maskW * maskH)
+        for (y in 0 until maskH) {
+            for (x in 0 until maskW) {
+                var sum = 0f
+                val offset = (y * maskW + x) * 32
+                for (i in 0 until 32) {
+                    sum += coeffs[i] * protos[offset + i]
+                }
+                val sig = 1.0f / (1.0f + exp(-sum.toDouble())).toFloat()
+                pixels[y * maskW + x] = (if (sig > 0.5f) 255 else 0).toByte()
+            }
+        }
+        val mask = Bitmap.createBitmap(maskW, maskH, Bitmap.Config.ALPHA_8)
+        mask.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
+        return mask
     }
 
     private fun generateYolactMask(coeffs: FloatArray, protos: ByteBuffer): Bitmap {

@@ -239,6 +239,12 @@
                         android:text="YOLACT\n(Framework: TFLite, Backbone: ResNet-50, Model: Float16, Res: 550x550)" />
 
                     <RadioButton
+                        android:id="@+id/radio_body_yolo26n_seg"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="yolo26n-seg\n(Framework: TFLite, Model: Float16, Res: 640x640)" />
+
+                    <RadioButton
                         android:id="@+id/radio_body_yolox"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
