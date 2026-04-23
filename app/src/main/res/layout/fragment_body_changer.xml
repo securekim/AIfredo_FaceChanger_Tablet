@@ -33,6 +33,21 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent" />
 
+    <!-- Performance Monitor in Upper Right -->
+    <TextView
+        android:id="@+id/perf_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        android:background="#80000000"
+        android:padding="8dp"
+        android:textColor="#00FF00"
+        android:textSize="11sp"
+        android:fontFamily="monospace"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        tools:text="CPU: 15.0% (Peak: 25.0%)\nMEM: 150MB (Peak: 200MB)" />
+
     <androidx.core.widget.NestedScrollView
         android:id="@+id/logScroll"
         android:layout_width="0dp"

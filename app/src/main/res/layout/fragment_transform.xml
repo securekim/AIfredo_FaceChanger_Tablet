@@ -44,23 +44,40 @@
         android:id="@+id/version_text"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_margin="16dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginTop="16dp"
         android:background="#80000000"
-        android:padding="8dp"
+        android:padding="4dp"
         android:textColor="#00FF00"
-        android:textSize="12sp"
+        android:textSize="10sp"
         android:textStyle="bold"
         android:fontFamily="monospace"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         android:text="03.11.19.30.55" />
 
+    <!-- Performance Monitor -->
+    <TextView
+        android:id="@+id/perf_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="16dp"
+        android:layout_marginTop="4dp"
+        android:background="#80000000"
+        android:padding="8dp"
+        android:textColor="#00FF00"
+        android:textSize="10sp"
+        android:fontFamily="monospace"
+        app:layout_constraintTop_toBottomOf="@id/version_text"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:text="CPU: --% (Peak: --%)\nMEM: --MB (Peak: --MB)" />
+
     <!-- Identity Profile Thumbnails -->
     <LinearLayout
         android:id="@+id/profileContainer"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="60dp"
+        android:layout_marginTop="80dp"
         android:layout_marginEnd="16dp"
         android:orientation="vertical"
         app:layout_constraintTop_toTopOf="parent"

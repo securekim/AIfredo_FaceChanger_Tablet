@@ -6,6 +6,21 @@
     android:layout_height="match_parent"
     tools:context=".ui.slideshow.SlideshowFragment">
 
+    <!-- Performance Monitor in Upper Right -->
+    <TextView
+        android:id="@+id/perf_text"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        android:background="#80000000"
+        android:padding="8dp"
+        android:textColor="#00FF00"
+        android:textSize="10sp"
+        android:fontFamily="monospace"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:text="CPU: --% (Peak: --%)\nMEM: --MB (Peak: --MB)" />
+
     <TextView
         android:id="@+id/text_slideshow"
         android:layout_width="match_parent"

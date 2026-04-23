@@ -97,6 +97,19 @@ class TransformFragment : Fragment() {
     private var modelInputWidth = 256
     private var modelInputHeight = 256
 
+    // Performance Monitoring
+    private var maxMem = 0L
+    private var maxCpu = 0.0
+    private var lastCpuTime = 0L
+    private var lastSampleTime = 0L
+    private val perfHandler = Handler(Looper.getMainLooper())
+    private val perfRunnable = object : Runnable {
+        override fun run() {
+            updatePerformanceMetrics()
+            perfHandler.postDelayed(this, 1000)
+        }
+    }
+
     // RTSP
     private var exoPlayer: ExoPlayer? = null
     private var isRtspMode = false
@@ -134,12 +147,14 @@ class TransformFragment : Fragment() {
         loadPreferences()
         startStream()
         setupModels()
+        perfHandler.post(perfRunnable)
     }
 
     override fun onPause() {
         super.onPause()
         stopRtsp()
         stopCamera()
+        perfHandler.removeCallbacks(perfRunnable)
     }
 
     private fun loadPreferences() {
@@ -243,6 +258,33 @@ class TransformFragment : Fragment() {
                 modelInputWidth = 256; modelInputHeight = 256
             }
         }
+    }
+
+    private fun updatePerformanceMetrics() {
+        val b = _binding ?: return
+        val runtime = Runtime.getRuntime()
+        val usedMem = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
+        if (usedMem > maxMem) maxMem = usedMem
+
+        val currentCpuTime = android.os.Process.getElapsedCpuTime()
+        val currentTime = System.currentTimeMillis()
+        var cpuUsage = 0.0
+        if (lastSampleTime > 0) {
+            val cpuDiff = currentCpuTime - lastCpuTime
+            val timeDiff = currentTime - lastSampleTime
+            if (timeDiff > 0) {
+                cpuUsage = (cpuDiff.toDouble() / timeDiff.toDouble() / Runtime.getRuntime().availableProcessors()) * 100.0
+                if (cpuUsage > maxCpu) maxCpu = cpuUsage
+            }
+        }
+        lastCpuTime = currentCpuTime
+        lastSampleTime = currentTime
+
+        b.perfText?.text = String.format(
+            Locale.getDefault(),
+            "CPU: %.1f%% (Peak: %.1f%%)\nMEM: %dMB (Peak: %dMB)\nGPU: %s",
+            cpuUsage, maxCpu, usedMem, maxMem, if (gpuDelegate != null) "Active" else "Off"
+        )
     }
 
     private fun processStylization(originalWidth: Int, originalHeight: Int, timestamp: Long) {

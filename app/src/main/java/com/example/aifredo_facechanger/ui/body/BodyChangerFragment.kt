@@ -137,6 +137,19 @@ class BodyChangerFragment : Fragment() {
     private var rvmModelFile = "rvm_resnet50_192x320_model_float16_quant.tflite"
     private val yoloxModelFile = "yolox_n_body_head_hand_post_0461_0.4428_1x3x256x320_float16.tflite"
 
+    // Performance Monitoring
+    private var maxMem = 0L
+    private var maxCpu = 0.0
+    private var lastCpuTime = 0L
+    private var lastSampleTime = 0L
+    private val perfHandler = Handler(Looper.getMainLooper())
+    private val perfRunnable = object : Runnable {
+        override fun run() {
+            updatePerformanceMetrics()
+            perfHandler.postDelayed(this, 1000)
+        }
+    }
+
     private var exoPlayer: ExoPlayer? = null
     private var isRtspMode = false
     private val rtspFrameHandler = Handler(Looper.getMainLooper())
@@ -177,12 +190,14 @@ class BodyChangerFragment : Fragment() {
         loadSettings()
         startStream()
         setupSegmenter()
+        perfHandler.post(perfRunnable)
     }
 
     override fun onPause() {
         super.onPause()
         stopRtsp()
         stopCamera()
+        perfHandler.removeCallbacks(perfRunnable)
         lifecycleScope.launch(Dispatchers.Default) { synchronized(segmenterLock) { closeCurrentSegmenter() } }
     }
 
@@ -238,6 +253,33 @@ class BodyChangerFragment : Fragment() {
                 isInitializing = false
             }
         }
+    }
+
+    private fun updatePerformanceMetrics() {
+        if (_binding == null) return
+        val runtime = Runtime.getRuntime()
+        val usedMem = (runtime.totalMemory() - runtime.freeMemory()) / 1024 / 1024
+        if (usedMem > maxMem) maxMem = usedMem
+
+        val currentCpuTime = android.os.Process.getElapsedCpuTime()
+        val currentTime = System.currentTimeMillis()
+        var cpuUsage = 0.0
+        if (lastSampleTime > 0) {
+            val cpuDiff = currentCpuTime - lastCpuTime
+            val timeDiff = currentTime - lastSampleTime
+            if (timeDiff > 0) {
+                cpuUsage = (cpuDiff.toDouble() / timeDiff.toDouble() / Runtime.getRuntime().availableProcessors()) * 100.0
+                if (cpuUsage > maxCpu) maxCpu = cpuUsage
+            }
+        }
+        lastCpuTime = currentCpuTime
+        lastSampleTime = currentTime
+
+        binding.perfText.text = String.format(
+            Locale.getDefault(),
+            "CPU: %.1f%% (Peak: %.1f%%)\nMEM: %dMB (Peak: %dMB)\nGPU: %s",
+            cpuUsage, maxCpu, usedMem, maxMem, if (gpuDelegate != null) "Active" else "Off"
+        )
     }
 
     private fun closeCurrentSegmenter() {
