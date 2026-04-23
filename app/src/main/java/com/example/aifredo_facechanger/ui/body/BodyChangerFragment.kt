@@ -3,9 +3,15 @@ package com.example.aifredo_facechanger.ui.body
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.*
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.Rect
+import android.graphics.RectF
 import android.os.Bundle
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.util.Log
 import android.util.Size
@@ -15,7 +21,9 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn
-import androidx.camera.core.*
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
@@ -43,7 +51,8 @@ import org.tensorflow.lite.support.common.FileUtil
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -125,8 +134,9 @@ class BodyChangerFragment : Fragment() {
     private var reusableScoresArray: FloatArray? = null
 
     private var rtspBitmapBuffer: Bitmap? = null
-    private var rtspBitmapPool = arrayOfNulls<Bitmap>(3)
-    private var rtspPoolIdx = 0
+
+    private var frameExtractionThread: HandlerThread? = null
+    private var backgroundRtspHandler: Handler? = null
 
     private val segmenterLock = Any()
 
@@ -146,7 +156,6 @@ class BodyChangerFragment : Fragment() {
     private var rvmModelFile = "rvm_resnet50_192x320_model_float16_quant.tflite"
     private val yoloxModelFile = "yolox_n_body_head_hand_post_0461_0.4428_1x3x256x320_float16.tflite"
 
-    // Performance Monitoring
     private var maxMem = 0L
     private var maxCpu = 0.0
     private var lastCpuTime = 0L
@@ -161,15 +170,18 @@ class BodyChangerFragment : Fragment() {
 
     private var exoPlayer: ExoPlayer? = null
     private var isRtspMode = false
+
     private val rtspFrameHandler = Handler(Looper.getMainLooper())
     private val rtspFrameRunnable = object : Runnable {
         override fun run() {
             if (isRtspMode && exoPlayer?.isPlaying == true) {
-                if (!isProcessing.get()) {
-                    extractFrameFromPlayer()
+                if (isProcessing.compareAndSet(false, true)) {
+                    cameraExecutor?.execute {
+                        extractFrameFromPlayer()
+                    }
                 }
             }
-            rtspFrameHandler.postDelayed(this, 16)
+            rtspFrameHandler.postDelayed(this, 33)
         }
     }
 
@@ -189,6 +201,9 @@ class BodyChangerFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         cameraExecutor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors())
+
+        frameExtractionThread = HandlerThread("RTSP_FrameExtractor").apply { start() }
+        backgroundRtspHandler = Handler(frameExtractionThread!!.looper)
 
         if (allPermissionsGranted()) startStream()
         else requestPermissionLauncher.launch(arrayOf(Manifest.permission.CAMERA))
@@ -301,7 +316,6 @@ class BodyChangerFragment : Fragment() {
             gpuDelegate?.close(); gpuDelegate = null
             nnApiDelegate?.close(); nnApiDelegate = null
             rtspBitmapBuffer?.recycle(); rtspBitmapBuffer = null
-            for (i in rtspBitmapPool.indices) { rtspBitmapPool[i]?.recycle(); rtspBitmapPool[i] = null }
             rvmMaskBitmap?.recycle(); rvmMaskBitmap = null
             rvmInputs = null
             rvmOutputs = null
@@ -411,7 +425,7 @@ class BodyChangerFragment : Fragment() {
     private fun getInterpreterOptions(): Interpreter.Options {
         val options = Interpreter.Options()
         actualDelegate = "CPU"
-        
+
         val threadCount = Runtime.getRuntime().availableProcessors()
         options.setNumThreads(threadCount)
         options.setUseXNNPACK(true)
@@ -586,7 +600,7 @@ class BodyChangerFragment : Fragment() {
                 .add(NormalizeOp(0f, 255f))
                 .build()
             rvmTensorImage = TensorImage(DataType.FLOAT32)
-            
+
             if (isRvmNCHW) {
                 rvmNchwBuffer = ByteBuffer.allocateDirect(1 * 3 * rvmW * rvmH * 4).order(ByteOrder.nativeOrder())
             }
@@ -662,31 +676,31 @@ class BodyChangerFragment : Fragment() {
 
     @OptIn(UnstableApi::class)
     private fun extractFrameFromPlayer() {
-        if (!isRtspMode) return
-        val b = _binding ?: return
-        val textureView = b.playerView.videoSurfaceView as? TextureView ?: return
+        val b = _binding
+        if (b == null) {
+            isProcessing.set(false)
+            return
+        }
+        val textureView = b.playerView.videoSurfaceView as? TextureView
+        if (textureView == null || !textureView.isAvailable) {
+            isProcessing.set(false)
+            return
+        }
 
         val targetW = if (selectedModel == "RVM 720x1280") 1280 else 320
         val targetH = if (selectedModel == "RVM 720x1280") 720 else 192
 
         if (rtspBitmapBuffer == null || rtspBitmapBuffer!!.width != targetW) {
             rtspBitmapBuffer = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-            for (i in rtspBitmapPool.indices) {
-                rtspBitmapPool[i]?.recycle()
-                rtspBitmapPool[i] = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-            }
         }
 
         try {
             textureView.getBitmap(rtspBitmapBuffer!!)
-            val poolBitmap = rtspBitmapPool[rtspPoolIdx]!!
-            val canvas = Canvas(poolBitmap)
-            canvas.drawBitmap(rtspBitmapBuffer!!, 0f, 0f, null)
-            rtspPoolIdx = (rtspPoolIdx + 1) % rtspBitmapPool.size
-            
-            cameraExecutor?.execute { processFrameBitmap(poolBitmap) }
+            val frame = rtspBitmapBuffer!!.copy(Bitmap.Config.ARGB_8888, false)
+            processFrameBitmap(frame)
         } catch (e: Exception) {
             Log.e(tagStr, "getBitmap failed", e)
+            isProcessing.set(false)
         }
     }
 
@@ -697,7 +711,6 @@ class BodyChangerFragment : Fragment() {
         exoPlayer?.release(); exoPlayer = null
         _binding?.playerView?.player = null
         rtspBitmapBuffer?.recycle(); rtspBitmapBuffer = null
-        for (i in rtspBitmapPool.indices) { rtspBitmapPool[i]?.recycle(); rtspBitmapPool[i] = null }
     }
 
     private fun processFrame(imageProxy: ImageProxy) {
@@ -740,17 +753,11 @@ class BodyChangerFragment : Fragment() {
     }
 
     private fun processFrameBitmap(bitmap: Bitmap) {
-        if (isProcessing.getAndSet(true)) {
-            // RTSP 모드에서는 풀의 비트맵을 사용하므로 여기서 recycle하지 않음
-            if (!isRtspMode) bitmap.recycle()
-            return
-        }
-
         synchronized(segmenterLock) {
             when (selectedModel) {
                 "MediaPipe Pose" -> {
                     poseLandmarker?.detectAsync(BitmapImageBuilder(bitmap).build(), System.currentTimeMillis())
-                    if (!isRtspMode) bitmap.recycle()
+                    bitmap.recycle()
                     isProcessing.set(false)
                 }
                 "YOLACT" -> processYolact(bitmap)
@@ -759,7 +766,7 @@ class BodyChangerFragment : Fragment() {
                 "RVM 192x320", "RVM 720x1280", "RVM" -> processRvm(bitmap)
                 "ML Kit" -> processMlKit(bitmap)
                 else -> {
-                    if (!isRtspMode) bitmap.recycle()
+                    bitmap.recycle()
                     isProcessing.set(false)
                 }
             }
@@ -769,7 +776,7 @@ class BodyChangerFragment : Fragment() {
     private fun processMlKit(bitmap: Bitmap) {
         val segmenter = mlKitSegmenter
         if (segmenter == null) {
-            if (!isRtspMode) bitmap.recycle()
+            bitmap.recycle()
             isProcessing.set(false)
             return
         }
@@ -786,7 +793,7 @@ class BodyChangerFragment : Fragment() {
                 }
             }
             .addOnFailureListener {
-                if (!isRtspMode) bitmap.recycle()
+                bitmap.recycle()
                 isProcessing.set(false)
             }
     }
@@ -795,21 +802,21 @@ class BodyChangerFragment : Fragment() {
         val interpreter = yolactInterpreter
         val tImage = yolactTensorImage
         if (interpreter == null || tImage == null) {
-            if (!isRtspMode) bitmap.recycle()
+            bitmap.recycle()
             isProcessing.set(false)
             return
         }
         tImage.load(bitmap)
         val inputBuffer = yolactImageProcessor?.process(tImage)?.buffer
         if (inputBuffer == null) {
-            if (!isRtspMode) bitmap.recycle()
+            bitmap.recycle()
             isProcessing.set(false)
             return
         }
         yolactOutputBoxes?.clear(); yolactOutputScores?.clear(); yolactOutputCoeffs?.clear(); yolactOutputProtos?.clear()
         val outputs = mapOf(yolactIdxBoxes to yolactOutputBoxes!!, yolactIdxScores to yolactOutputScores!!, yolactIdxCoeffs to yolactOutputCoeffs!!, yolactIdxProtos to yolactOutputProtos!!)
-        try { interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs) } catch (e: Exception) { if (!isRtspMode) bitmap.recycle(); isProcessing.set(false); return }
-        yolactOutputScores?.rewind(); val scoresArray = reusableScoresArray ?: return.also { if (!isRtspMode) bitmap.recycle(); isProcessing.set(false) }
+        try { interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs) } catch (e: Exception) { bitmap.recycle(); isProcessing.set(false); return }
+        yolactOutputScores?.rewind(); val scoresArray = reusableScoresArray ?: return.also { bitmap.recycle(); isProcessing.set(false) }
         yolactOutputScores?.asFloatBuffer()?.get(scoresArray)
         var bestIdx = -1; var maxScore = 0f
         for (i in 0 until 19248) { val score = scoresArray[i * 81 + 1]; if (score > maxScore) { maxScore = score; bestIdx = i } }
@@ -823,7 +830,7 @@ class BodyChangerFragment : Fragment() {
                 isProcessing.set(false)
             }
         } else {
-            if (!isRtspMode) bitmap.recycle()
+            bitmap.recycle()
             isProcessing.set(false)
         }
     }
@@ -844,22 +851,22 @@ class BodyChangerFragment : Fragment() {
         val interpreter = modnetInterpreter
         val tImage = modnetTensorImage
         if (interpreter == null || tImage == null) {
-            if (!isRtspMode) bitmap.recycle()
+            bitmap.recycle()
             isProcessing.set(false)
             return
         }
         tImage.load(bitmap)
         val inputBuffer = modnetImageProcessor?.process(tImage)?.buffer
         if (inputBuffer == null) {
-            if (!isRtspMode) bitmap.recycle()
+            bitmap.recycle()
             isProcessing.set(false)
             return
         }
         modnetOutputBuffer?.clear()
-        try { interpreter.run(inputBuffer, modnetOutputBuffer) } catch (e: Exception) { if (!isRtspMode) bitmap.recycle(); isProcessing.set(false); return }
+        try { interpreter.run(inputBuffer, modnetOutputBuffer) } catch (e: Exception) { bitmap.recycle(); isProcessing.set(false); return }
         modnetOutputBuffer?.rewind(); val fb = modnetOutputBuffer?.asFloatBuffer()
         if (fb == null) {
-            if (!isRtspMode) bitmap.recycle()
+            bitmap.recycle()
             isProcessing.set(false)
             return
         }
@@ -876,8 +883,9 @@ class BodyChangerFragment : Fragment() {
     private fun processYoloxHybrid(bitmap: Bitmap) {
         val yolox = yoloxInterpreter
         val rvm = rvmInterpreter
+        val yInBuf = yoloxOutputBuffer
         if (yolox == null || rvm == null) {
-            if (!isRtspMode) bitmap.recycle()
+            bitmap.recycle()
             isProcessing.set(false)
             return
         }
@@ -888,11 +896,11 @@ class BodyChangerFragment : Fragment() {
             yolox.run(yoloxInput, yoloxOutputBuffer)
         } catch (e: Exception) {
             Log.e(tagStr, "YOLOX Error", e)
-            if (!isRtspMode) bitmap.recycle(); isProcessing.set(false); return
+            bitmap.recycle(); isProcessing.set(false); return
         }
 
         yoloxOutputBuffer?.rewind()
-        val yoloxFb = yoloxOutputBuffer?.asFloatBuffer() ?: return.also { if (!isRtspMode) bitmap.recycle(); isProcessing.set(false) }
+        val yoloxFb = yoloxOutputBuffer?.asFloatBuffer() ?: return.also { bitmap.recycle(); isProcessing.set(false) }
 
         var maxScore = 0f
         var bestBox = RectF(0f, 0f, bitmap.width.toFloat(), bitmap.height.toFloat())
@@ -909,21 +917,49 @@ class BodyChangerFragment : Fragment() {
                     val cy = yoloxFb.get(i * 85 + 1)
                     val w = yoloxFb.get(i * 85 + 2)
                     val h = yoloxFb.get(i * 85 + 3)
+
+                    val normCx = if (cx > 2f) cx / yoloxW else cx
+                    val normCy = if (cy > 2f) cy / yoloxH else cy
+                    val normW = if (w > 2f) w / yoloxW else w
+                    val normH = if (h > 2f) h / yoloxH else h
+
                     bestBox = RectF(
-                        (cx - w / 2) / yoloxW * bitmap.width,
-                        (cy - h / 2) / yoloxH * bitmap.height,
-                        (cx + w / 2) / yoloxW * bitmap.width,
-                        (cy + h / 2) / yoloxH * bitmap.height
+                        (normCx - normW / 2) * bitmap.width,
+                        (normCy - normH / 2) * bitmap.height,
+                        (normCx + normW / 2) * bitmap.width,
+                        (normCy + normH / 2) * bitmap.height
                     )
                 }
             }
         }
 
-        val rvmInput = convertBitmapToByteBuffer(bitmap, rvmW, rvmH, isRvmNCHW)
-        val inputs = rvmInputs ?: return.also { if (!isRtspMode) bitmap.recycle(); isProcessing.set(false) }
-        val outputs = rvmOutputs ?: return.also { if (!isRtspMode) bitmap.recycle(); isProcessing.set(false) }
+        val tImage = rvmTensorImage ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+        tImage.load(bitmap)
+        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: return.also { bitmap.recycle(); isProcessing.set(false) }
 
-        inputs[rvmIdxSrc] = rvmInput
+        val inputs = rvmInputs ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+        val outputs = rvmOutputs ?: return.also { bitmap.recycle(); isProcessing.set(false) }
+
+        if (isRvmNCHW) {
+            val nchw = rvmNchwBuffer ?: ByteBuffer.allocateDirect(1 * 3 * rvmW * rvmH * 4).order(ByteOrder.nativeOrder()).also { rvmNchwBuffer = it }
+            nchw.clear()
+            val fbIn = inputBuffer.asFloatBuffer()
+            val totalPixels = rvmW * rvmH
+            val inputArr = rvmInputArr ?: FloatArray(totalPixels * 3).also { rvmInputArr = it }
+            fbIn.get(inputArr)
+
+            val nchwFb = nchw.asFloatBuffer()
+            for (c in 0 until 3) {
+                for (i in 0 until totalPixels) {
+                    nchwFb.put(inputArr[i * 3 + c])
+                }
+            }
+            nchw.rewind()
+            inputs[rvmIdxSrc] = nchw
+        } else {
+            inputs[rvmIdxSrc] = inputBuffer
+        }
+
         val nextToggle = 1 - rvmStateToggle
 
         if (rvmIdxR1i != -1) { inputs[rvmIdxR1i] = rvmStateBuffers[0][rvmStateToggle]!!; rvmStateBuffers[0][rvmStateToggle]?.rewind() }
@@ -945,20 +981,23 @@ class BodyChangerFragment : Fragment() {
             rvmStateToggle = nextToggle
         } catch (e: Exception) {
             Log.e(tagStr, "RVM Error", e)
-            if (!isRtspMode) bitmap.recycle(); isProcessing.set(false); return
+            bitmap.recycle(); isProcessing.set(false); return
         }
 
         rvmOutputPha?.rewind()
-        val rvmFb = rvmOutputPha?.asFloatBuffer() ?: return.also { if (!isRtspMode) bitmap.recycle(); isProcessing.set(false) }
+        val rvmFb = rvmOutputPha?.asFloatBuffer() ?: return.also { bitmap.recycle(); isProcessing.set(false) }
 
         val count = rvmH * rvmW
         val byteArr = ByteArray(count)
 
+        val paddingX = (bestBox.width() * 0.1f) / bitmap.width * rvmW
+        val paddingY = (bestBox.height() * 0.1f) / bitmap.height * rvmH
+
         val rvmBox = RectF(
-            bestBox.left / bitmap.width * rvmW,
-            bestBox.top / bitmap.height * rvmH,
-            bestBox.right / bitmap.width * rvmW,
-            bestBox.bottom / bitmap.height * rvmH
+            (bestBox.left / bitmap.width * rvmW) - paddingX,
+            (bestBox.top / bitmap.height * rvmH) - paddingY,
+            (bestBox.right / bitmap.width * rvmW) + paddingX,
+            (bestBox.bottom / bitmap.height * rvmH) + paddingY
         )
 
         for (y in 0 until rvmH) {
@@ -998,14 +1037,14 @@ class BodyChangerFragment : Fragment() {
         val outputs = rvmOutputs
 
         if (interpreter == null || inputs == null || outputs == null || rvmIdxSrc == -1) {
-            if (!isRtspMode) bitmap.recycle()
+            bitmap.recycle()
             isProcessing.set(false)
             return
         }
 
-        val tImage = rvmTensorImage ?: return.also { if (!isRtspMode) bitmap.recycle(); isProcessing.set(false) }
+        val tImage = rvmTensorImage ?: return.also { bitmap.recycle(); isProcessing.set(false) }
         tImage.load(bitmap)
-        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: return.also { if (!isRtspMode) bitmap.recycle(); isProcessing.set(false) }
+        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: return.also { bitmap.recycle(); isProcessing.set(false) }
 
         val totalPixels = rvmW * rvmH
         if (isRvmNCHW) {
@@ -1014,11 +1053,11 @@ class BodyChangerFragment : Fragment() {
             val fbIn = inputBuffer.asFloatBuffer()
             val inputArr = rvmInputArr ?: FloatArray(totalPixels * 3).also { rvmInputArr = it }
             fbIn.get(inputArr)
-            
+
             val nchwArr = rvmNchwFloatArray ?: FloatArray(totalPixels * 3).also { rvmNchwFloatArray = it }
             val numCores = Runtime.getRuntime().availableProcessors()
             val chunkSize = totalPixels / numCores
-            
+
             runBlocking {
                 (0 until numCores).map { coreIdx ->
                     launch(Dispatchers.Default) {
@@ -1064,15 +1103,15 @@ class BodyChangerFragment : Fragment() {
             rvmStateToggle = nextToggle
         } catch (e: Exception) {
             Log.e(tagStr, "RVM Inference Error", e)
-            if (!isRtspMode) bitmap.recycle()
+            bitmap.recycle()
             isProcessing.set(false)
             return
         }
 
         rvmOutputPha?.rewind()
-        val fbOut = rvmOutputPha?.asFloatBuffer() ?: return.also { if (!isRtspMode) bitmap.recycle(); isProcessing.set(false) }
+        val fbOut = rvmOutputPha?.asFloatBuffer() ?: return.also { bitmap.recycle(); isProcessing.set(false) }
         val outArr = rvmOutputFloatArray ?: FloatArray(totalPixels).also { rvmOutputFloatArray = it }
-        fbOut.get(outArr) 
+        fbOut.get(outArr)
 
         val byteArr = rvmByteArray!!
         val numCores = Runtime.getRuntime().availableProcessors()
@@ -1116,5 +1155,12 @@ class BodyChangerFragment : Fragment() {
 
     private fun allPermissionsGranted() = ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
 
-    override fun onDestroyView() { super.onDestroyView() ; cameraExecutor?.shutdown(); _binding = null }
+    override fun onDestroyView() {
+        super.onDestroyView()
+        frameExtractionThread?.quitSafely()
+        frameExtractionThread = null
+        backgroundRtspHandler = null
+        cameraExecutor?.shutdown()
+        _binding = null
+    }
 }
