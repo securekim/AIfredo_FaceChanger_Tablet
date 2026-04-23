@@ -20,9 +20,15 @@ class BodyOverlayView @JvmOverloads constructor(
     private var startColor: Int = Color.RED
     private var endColor: Int = Color.BLUE
     private var isMirrorMode: Boolean = false
+    private var boundingBox: RectF? = null
 
     private val gradientPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val backgroundPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.GREEN
+        style = Paint.Style.STROKE
+        strokeWidth = 8f
+    }
 
     private var lastViewHeight = -1f
     private var lastStartColor = 0
@@ -42,11 +48,22 @@ class BodyOverlayView @JvmOverloads constructor(
 
         maskBitmap = mask
         backgroundBitmap = original
+        boundingBox = null // Clear box if drawing mask
 
         this.startColor = startCol
         this.endColor = endCol
         this.isMirrorMode = isMirror
 
+        postInvalidate()
+    }
+
+    fun updateBoundingBox(box: RectF?, original: Bitmap?, isMirror: Boolean = false) {
+        if (backgroundBitmap != null && backgroundBitmap != original) {
+            recycleQueue.add(backgroundBitmap)
+        }
+        backgroundBitmap = original
+        boundingBox = box
+        this.isMirrorMode = isMirror
         postInvalidate()
     }
 
@@ -59,6 +76,7 @@ class BodyOverlayView @JvmOverloads constructor(
         if (backgroundBitmap != null) recycleQueue.add(backgroundBitmap)
         maskBitmap = null
         backgroundBitmap = null
+        boundingBox = null
         postInvalidate()
     }
 
@@ -67,6 +85,7 @@ class BodyOverlayView @JvmOverloads constructor(
 
         val bg = backgroundBitmap
         val mask = maskBitmap
+        val box = boundingBox
 
         val vw = width.toFloat()
         val vh = height.toFloat()
@@ -77,6 +96,7 @@ class BodyOverlayView @JvmOverloads constructor(
             drawScaledBitmap(canvas, bg, vw, vh, backgroundPaint)
         }
 
+        // 2. 마스크 그리기 (그라데이션)
         if (mask != null && !mask.isRecycled) {
             if (vh != lastViewHeight || startColor != lastStartColor || endColor != lastEndColor) {
                 gradientPaint.shader = LinearGradient(0f, 0f, 0f, vh, startColor, endColor, Shader.TileMode.CLAMP)
@@ -98,10 +118,47 @@ class BodyOverlayView @JvmOverloads constructor(
             canvas.restore()
         }
 
+        // 3. 바운딩 박스 그리기
+        if (box != null && bg != null && !bg.isRecycled) {
+            val halfWidth = vw / 2f
+            canvas.save()
+            if (isMirrorMode) {
+                canvas.clipRect(0f, 0f, halfWidth, vh)
+            } else {
+                canvas.clipRect(halfWidth, 0f, vw, vh)
+            }
+            
+            val bw = bg.width.toFloat()
+            val bh = bg.height.toFloat()
+            val scale: Float
+            val dx: Float
+            val dy: Float
+            val viewRatio = vw / vh
+            val bitmapRatio = bw / bh
+
+            if (bitmapRatio > viewRatio) {
+                scale = vh / bh
+                dx = (vw - bw * scale) / 2f
+                dy = 0f
+            } else {
+                scale = vw / bw
+                dx = 0f
+                dy = (vh - bh * scale) / 2f
+            }
+
+            val drawBox = RectF(
+                box.left * scale + dx,
+                box.top * scale + dy,
+                box.right * scale + dx,
+                box.bottom * scale + dy
+            )
+            canvas.drawRect(drawBox, boxPaint)
+            canvas.restore()
+        }
+
         // [핵심 변경] 그리기(onDraw)가 완전히 끝난 직후, 대기 중이던 옛날 비트맵들을 안전하게 파기
         while (recycleQueue.isNotEmpty()) {
             val bmp = recycleQueue.poll()
-            // 혹시라도 현재 그리기 중인 비트맵이 큐에 잘못 들어갔을 경우를 대비한 2중 방어벽
             if (bmp != null && !bmp.isRecycled && bmp != maskBitmap && bmp != backgroundBitmap) {
                 bmp.recycle()
             }

@@ -106,6 +106,7 @@ class SettingsFragment : Fragment() {
             "ML Kit" -> binding.radioBodyMlkit.isChecked = true
             "YOLACT" -> binding.radioBodyYolact.isChecked = true
             "YOLOX + RVM" -> binding.radioBodyYolox.isChecked = true
+            "YOLOX tiny" -> binding.radioBodyYoloxTiny.isChecked = true
             "MODNet" -> binding.radioBodyModnet.isChecked = true
             "RVM 192x320" -> binding.radioBodyRvm320.isChecked = true
             "RVM 720x1280" -> binding.radioBodyRvm1280.isChecked = true
@@ -118,6 +119,7 @@ class SettingsFragment : Fragment() {
                 R.id.radio_body_mlkit -> "ML Kit"
                 R.id.radio_body_yolact -> "YOLACT"
                 R.id.radio_body_yolox -> "YOLOX + RVM"
+                R.id.radio_body_yolox_tiny -> "YOLOX tiny"
                 R.id.radio_body_modnet -> "MODNet"
                 R.id.radio_body_rvm_320 -> "RVM 192x320"
                 R.id.radio_body_rvm_1280 -> "RVM 720x1280"

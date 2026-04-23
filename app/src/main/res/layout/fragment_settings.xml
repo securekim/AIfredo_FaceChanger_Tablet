@@ -245,6 +245,12 @@
                         android:text="YOLOX + RVM\n(Detection + Segmentation)" />
 
                     <RadioButton
+                        android:id="@+id/radio_body_yolox_tiny"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="YOLOX tiny\n(Detection Bounding Box Only)" />
+
+                    <RadioButton
                         android:id="@+id/radio_body_modnet"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"

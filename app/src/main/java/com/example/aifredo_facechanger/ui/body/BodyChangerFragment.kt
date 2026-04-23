@@ -122,6 +122,7 @@ class BodyChangerFragment : Fragment() {
     private var rvmW: Int = 320
     private var yoloxW: Int = 320
     private var yoloxH: Int = 256
+    private var isYoloxNchw: Boolean = true
     private var rvmIdxSrc = -1
     private var rvmIdxR1i = -1; private var rvmIdxR2i = -1; private var rvmIdxR3i = -1; private var rvmIdxR4i = -1
     private var rvmIdxRatio = -1
@@ -157,7 +158,8 @@ class BodyChangerFragment : Fragment() {
     private val yolactModelFile = "yolact_550x550_model_float16_quant.tflite"
     private val modnetModelFile = "MODNet_256x256_model_float16_quant.tflite"
     private var rvmModelFile = "rvm_resnet50_192x320_model_float16_quant.tflite"
-    private val yoloxModelFile = "yolox_n_body_head_hand_post_0461_0.4428_1x3x256x320_float16.tflite"
+    private val yoloxHybridModelFile = "yolox_n_body_head_hand_post_0461_0.4428_1x3x256x320_float16.tflite"
+    private val yoloxTinyModelFile = "yolox_tiny_320x320_model_float16_quant.tflite"
 
     private var maxMem = 0L
     private var maxCpu = 0.0
@@ -266,9 +268,10 @@ class BodyChangerFragment : Fragment() {
                         "MediaPipe Pose" -> initMediaPipePose()
                         "YOLACT" -> initYolact()
                         "YOLOX + RVM" -> {
-                            initYolox()
+                            initYolox(yoloxHybridModelFile)
                             initRvm()
                         }
+                        "YOLOX tiny" -> initYolox(yoloxTinyModelFile)
                         "MODNet" -> initModNet()
                         "RVM 192x320", "RVM 720x1280", "RVM" -> initRvm()
                         "ML Kit" -> initMlKit()
@@ -471,11 +474,9 @@ class BodyChangerFragment : Fragment() {
             val delegate = GpuDelegate(gpuOptions)
             yoloxGpuDelegate = delegate
             options.addDelegate(delegate)
-            addLog(">> YOLOX GPU Delegate Applied")
         } catch (e: Exception) {
-            Log.e(tagStr, "YOLOX GPU Force Failed, falling back to XNNPACK", e)
+            Log.e(tagStr, "YOLOX GPU Delegate setup failed", e)
             options.setUseXNNPACK(true)
-            addLog(">> YOLOX GPU Failed, Using XNNPACK")
         }
         return options
     }
@@ -515,17 +516,54 @@ class BodyChangerFragment : Fragment() {
         } catch (e: Exception) { addLog("MODNet Init Error: ${e.message}") }
     }
 
-    private fun initYolox() {
-        try {
-            val options = getYoloxGpuInterpreterOptions()
-            yoloxInterpreter = Interpreter(FileUtil.loadMappedFile(requireContext(), yoloxModelFile), options)
-            val inputShape = yoloxInterpreter!!.getInputTensor(0).shape()
-            yoloxH = if (inputShape[1] == 3) inputShape[2] else inputShape[1]
-            yoloxW = if (inputShape[1] == 3) inputShape[3] else inputShape[2]
-            yoloxOutputBuffer = ByteBuffer.allocateDirect(yoloxInterpreter!!.getOutputTensor(0).numBytes()).order(ByteOrder.nativeOrder())
-            addLog(">> YOLOX Ready (GPU Forced)")
-        } catch (e: Exception) {
-            addLog("YOLOX Init Error: ${e.message}")
+    private fun initYolox(modelFile: String) {
+        lifecycleScope.launch(Dispatchers.Default) {
+            val mappedFile = FileUtil.loadMappedFile(requireContext(), modelFile)
+            var interpreter: Interpreter? = null
+            var success = false
+
+            // Try GPU first
+            try {
+                val gpuOptions = getYoloxGpuInterpreterOptions()
+                interpreter = Interpreter(mappedFile, gpuOptions)
+                success = true
+                addLog(">> YOLOX Ready: $modelFile (GPU)")
+            } catch (e: Exception) {
+                Log.e(tagStr, "YOLOX GPU Delegate application failed, falling back to CPU", e)
+                yoloxGpuDelegate?.close()
+                yoloxGpuDelegate = null
+            }
+
+            // Fallback to CPU
+            if (!success) {
+                try {
+                    val cpuOptions = Interpreter.Options().apply {
+                        setNumThreads(Runtime.getRuntime().availableProcessors())
+                        setUseXNNPACK(true)
+                    }
+                    interpreter = Interpreter(mappedFile, cpuOptions)
+                    success = true
+                    addLog(">> YOLOX Ready: $modelFile (CPU/XNNPACK)")
+                } catch (e: Exception) {
+                    addLog("YOLOX Init Error: ${e.message}")
+                    return@launch
+                }
+            }
+
+            interpreter?.let { inter ->
+                val inputShape = inter.getInputTensor(0).shape()
+                if (inputShape[1] == 3) {
+                    isYoloxNchw = true
+                    yoloxH = inputShape[2]
+                    yoloxW = inputShape[3]
+                } else {
+                    isYoloxNchw = false
+                    yoloxH = inputShape[1]
+                    yoloxW = inputShape[2]
+                }
+                yoloxOutputBuffer = ByteBuffer.allocateDirect(inter.getOutputTensor(0).numBytes()).order(ByteOrder.nativeOrder())
+                yoloxInterpreter = inter
+            }
         }
     }
 
@@ -801,6 +839,7 @@ class BodyChangerFragment : Fragment() {
                 }
                 "YOLACT" -> processYolact(bitmap)
                 "YOLOX + RVM" -> processYoloxHybrid(bitmap)
+                "YOLOX tiny" -> processYoloxTiny(bitmap)
                 "MODNet" -> processModNet(bitmap)
                 "RVM 192x320", "RVM 720x1280", "RVM" -> processRvm(bitmap)
                 "ML Kit" -> processMlKit(bitmap)
@@ -919,6 +958,68 @@ class BodyChangerFragment : Fragment() {
         }
     }
 
+    private fun processYoloxTiny(bitmap: Bitmap) {
+        val yolox = yoloxInterpreter
+        if (yolox == null) {
+            bitmap.recycle()
+            isProcessing.set(false)
+            return
+        }
+
+        val yoloxInput = convertBitmapToByteBuffer(bitmap, yoloxW, yoloxH, isYoloxNchw)
+        yoloxOutputBuffer?.clear()
+        try {
+            yolox.run(yoloxInput, yoloxOutputBuffer)
+        } catch (e: Exception) {
+            Log.e(tagStr, "YOLOX Error", e)
+            bitmap.recycle()
+            isProcessing.set(false)
+            return
+        }
+
+        yoloxOutputBuffer?.rewind()
+        val yoloxFb = yoloxOutputBuffer?.asFloatBuffer() ?: run { bitmap.recycle(); isProcessing.set(false); return }
+        val yLen = yoloxFb.remaining()
+        val yArr = yoloxFloatArray ?: FloatArray(yLen).also { yoloxFloatArray = it }
+        yoloxFb.get(yArr)
+
+        var maxScore = 0f
+        var bestBox: RectF? = null
+        val numAnchors = yLen / 85
+
+        for (i in 0 until numAnchors) {
+            val objScore = yArr[i * 85 + 4]
+            if (objScore > 0.4f) {
+                val classScore = yArr[i * 85 + 5]
+                val totalScore = objScore * classScore
+                if (totalScore > maxScore) {
+                    maxScore = totalScore
+                    val cx = yArr[i * 85 + 0]
+                    val cy = yArr[i * 85 + 1]
+                    val w = yArr[i * 85 + 2]
+                    val h = yArr[i * 85 + 3]
+
+                    val normCx = if (cx > 2f) cx / yoloxW else cx
+                    val normCy = if (cy > 2f) cy / yoloxH else cy
+                    val normW = if (w > 2f) w / yoloxW else w
+                    val normH = if (h > 2f) h / yoloxH else h
+
+                    bestBox = RectF(
+                        (normCx - normW / 2) * bitmap.width,
+                        (normCy - normH / 2) * bitmap.height,
+                        (normCx + normW / 2) * bitmap.width,
+                        (normCy + normH / 2) * bitmap.height
+                    )
+                }
+            }
+        }
+
+        activity?.runOnUiThread {
+            _binding?.bodyOverlay?.updateBoundingBox(bestBox, bitmap, isMirrorMode)
+            isProcessing.set(false)
+        }
+    }
+
     private fun processYoloxHybrid(bitmap: Bitmap) {
         val yolox = yoloxInterpreter
         val rvm = rvmInterpreter
@@ -928,7 +1029,7 @@ class BodyChangerFragment : Fragment() {
             return
         }
 
-        val yoloxInput = convertBitmapToByteBuffer(bitmap, yoloxW, yoloxH, true)
+        val yoloxInput = convertBitmapToByteBuffer(bitmap, yoloxW, yoloxH, isYoloxNchw)
         yoloxOutputBuffer?.clear()
         try {
             yolox.run(yoloxInput, yoloxOutputBuffer)
