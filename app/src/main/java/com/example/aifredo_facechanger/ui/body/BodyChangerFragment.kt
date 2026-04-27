@@ -317,8 +317,8 @@ class BodyChangerFragment : Fragment() {
 
         binding.perfText.text = String.format(
             Locale.getDefault(),
-            "CPU: %.1f%% (Peak: %.1f%%)\nMEM: %dMB (Peak: %dMB)\nGPU: %s",
-            cpuUsage, maxCpu, usedMem, maxMem, if (gpuDelegate != null || yoloxGpuDelegate != null) "Active" else if (nnApiDelegate != null) "NNAPI" else "Off"
+            "CPU: %.1f%%\nMEM: %dMB (Peak: %dMB)\nGPU: %s",
+            cpuUsage, usedMem, maxMem, if (gpuDelegate != null || yoloxGpuDelegate != null) "Active" else if (nnApiDelegate != null) "NNAPI" else "Off"
         )
     }
 
@@ -469,14 +469,16 @@ class BodyChangerFragment : Fragment() {
             yolo26nImageProcessor = ImageProcessor.Builder().add(ResizeOp(640, 640, ResizeOp.ResizeMethod.BILINEAR)).add(NormalizeOp(0f, 255f)).build()
             yolo26nTensorImage = TensorImage(DataType.FLOAT32)
 
-            val out0Size = interpreter.getOutputTensor(0).numBytes()
-            val out1Size = interpreter.getOutputTensor(1).numBytes()
-
-            if (out0Size > out1Size) {
+            // [해결] 텐서 차원을 강제 인덱싱하지 않고 3차원이면 Detect, 4차원이면 Proto로 인식하도록 분기 처리
+            val shape0 = interpreter.getOutputTensor(0).shape()
+            if (shape0.size == 3) {
                 yolo26nIdxDetect = 0; yolo26nIdxProto = 1
             } else {
                 yolo26nIdxDetect = 1; yolo26nIdxProto = 0
             }
+
+            val out0Size = interpreter.getOutputTensor(0).numBytes()
+            val out1Size = interpreter.getOutputTensor(1).numBytes()
 
             yolo26nOutput0 = ByteBuffer.allocateDirect(out0Size).order(ByteOrder.nativeOrder())
             yolo26nOutput1 = ByteBuffer.allocateDirect(out1Size).order(ByteOrder.nativeOrder())
@@ -627,7 +629,6 @@ class BodyChangerFragment : Fragment() {
         val textureView = _binding?.playerView?.videoSurfaceView as? TextureView
         if (textureView == null || !textureView.isAvailable) { isProcessing.set(false); return }
 
-        // MediaPipe GPU 정렬 이슈 방지를 위해 너비/높이를 16의 배수로 강제 조정
         val targetW = (textureView.width / 16) * 16
         val targetH = (textureView.height / 16) * 16
         if (targetW <= 0 || targetH <= 0) { isProcessing.set(false); return }
@@ -639,7 +640,6 @@ class BodyChangerFragment : Fragment() {
             }
             try {
                 textureView.getBitmap(rtspBitmapBuffer!!)
-                // Copy를 통해 하드웨어 가속 비트맵에서 표준 소프트웨어 비트맵으로 변환 (연속적인 메모리 구조 보장)
                 val cleanBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
                 Canvas(cleanBitmap).drawBitmap(rtspBitmapBuffer!!, 0f, 0f, null)
                 cleanBitmap
@@ -742,7 +742,6 @@ class BodyChangerFragment : Fragment() {
         val pose = poseLandmarker
         if (pose != null) {
             try {
-                // 엄격하게 증가하는 타임스탬프 생성
                 var currentTimestamp = System.currentTimeMillis()
                 if (currentTimestamp <= lastMediaPipeTimestamp) {
                     currentTimestamp = lastMediaPipeTimestamp + 1
@@ -757,15 +756,14 @@ class BodyChangerFragment : Fragment() {
                     val mask = segmentationMasks.get()[0]
                     val width = mask.width
                     val height = mask.height
-                    
-                    // GPU 출력 시 비연속적 데이터 문제 해결을 위해 예외 처리 및 추출 시도
+
                     val byteBuffer = try {
                         com.google.mediapipe.framework.image.ByteBufferExtractor.extract(mask)
                     } catch (e: Exception) {
                         addLog("MP Mask Extract Error: ${e.message}")
                         null
                     }
-                    
+
                     if (byteBuffer == null) {
                         fallbackToEmptyMask(bitmap)
                         return
@@ -867,36 +865,73 @@ class BodyChangerFragment : Fragment() {
             return
         }
 
+        val detectTensor = interpreter.getOutputTensor(yolo26nIdxDetect)
+        val protoTensor = interpreter.getOutputTensor(yolo26nIdxProto)
+        val detectShape = detectTensor.shape()
+        val protoShape = protoTensor.shape()
+
+        // [해결] 텐서 크기와 깊이에 따라 Transpose 여부와 앵커 차원을 유동적으로 획득
+        val dDims = detectShape.size
+        val numAnchors = Math.max(detectShape[dDims - 1], detectShape[dDims - 2])
+        val numFeatures = Math.min(detectShape[dDims - 1], detectShape[dDims - 2])
+        val isDetectTransposed = detectShape[dDims - 1] == numFeatures
+
+        val pDims = protoShape.size
+        val isProtoNHWC = protoShape[pDims - 1] <= 32 || protoShape[pDims - 1] < protoShape[pDims - 2]
+        val maskC = if (isProtoNHWC) protoShape[pDims - 1] else protoShape[pDims - 3]
+        val maskH = if (isProtoNHWC) protoShape[pDims - 3] else protoShape[pDims - 2]
+        val maskW = if (isProtoNHWC) protoShape[pDims - 2] else protoShape[pDims - 1]
+
         val detectBuffer = if (yolo26nIdxDetect == 0) yolo26nOutput0 else yolo26nOutput1
         val protoBuffer = if (yolo26nIdxProto == 0) yolo26nOutput0 else yolo26nOutput1
 
         detectBuffer?.rewind(); val fbDet = detectBuffer?.asFloatBuffer() ?: return
         val detData = FloatArray(fbDet.remaining()); fbDet.get(detData)
 
-        val numAnchors = 8400
-        val numFeatures = detData.size / numAnchors
-        if (numFeatures < 5) {
+        // 클래스 개수 계산 및 음수 방어
+        val numClasses = numFeatures - maskC - 4
+        if (numFeatures < 5 || numClasses < 1) {
             fallbackToEmptyMask(bitmap)
             return
         }
 
-        var maxScore = 0f; var bestIdx = -1
+        // [해결] 모델의 첫번째 클래스가 Person이 아닐 수 있으므로 전체 클래스에서 Max Score 도출
+        var maxScore = 0f
+        var bestIdx = -1
         for (i in 0 until numAnchors) {
-            val score = detData[4 * numAnchors + i]
-            if (score > maxScore) { maxScore = score; bestIdx = i }
+            for (c in 0 until numClasses) {
+                val score = if (isDetectTransposed) {
+                    detData[i * numFeatures + 4 + c]
+                } else {
+                    detData[(4 + c) * numAnchors + i]
+                }
+                if (score > maxScore) {
+                    maxScore = score
+                    bestIdx = i
+                }
+            }
         }
 
         if (bestIdx != -1 && maxScore > 0.20f) {
-            val maskStartIndex = numFeatures - 32
-            val coeffs = FloatArray(32)
-            for (i in 0 until 32) {
-                coeffs[i] = detData[(maskStartIndex + i) * numAnchors + bestIdx]
+            val maskStartIndex = 4 + numClasses
+            val coeffs = FloatArray(maskC)
+            for (i in 0 until maskC) {
+                coeffs[i] = if (isDetectTransposed) {
+                    detData[bestIdx * numFeatures + maskStartIndex + i]
+                } else {
+                    detData[(maskStartIndex + i) * numAnchors + bestIdx]
+                }
             }
+
+            val cx = if (isDetectTransposed) detData[bestIdx * numFeatures + 0] else detData[0 * numAnchors + bestIdx]
+            val cy = if (isDetectTransposed) detData[bestIdx * numFeatures + 1] else detData[1 * numAnchors + bestIdx]
+            val bw = if (isDetectTransposed) detData[bestIdx * numFeatures + 2] else detData[2 * numAnchors + bestIdx]
+            val bh = if (isDetectTransposed) detData[bestIdx * numFeatures + 3] else detData[3 * numAnchors + bestIdx]
 
             protoBuffer?.rewind(); val fbProto = protoBuffer?.asFloatBuffer() ?: return
             val protos = FloatArray(fbProto.remaining()); fbProto.get(protos)
 
-            val maskBitmap = generateYoloMask(coeffs, protos, 160, 160)
+            val maskBitmap = generateYoloMask(coeffs, protos, maskW, maskH, maskC, isProtoNHWC, cx, cy, bw, bh)
             val finalMask = Bitmap.createScaledBitmap(maskBitmap, bitmap.width, bitmap.height, true)
             maskBitmap.recycle()
             activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode); isProcessing.set(false) }
@@ -905,16 +940,40 @@ class BodyChangerFragment : Fragment() {
         }
     }
 
-    private fun generateYoloMask(coeffs: FloatArray, protos: FloatArray, maskW: Int, maskH: Int): Bitmap {
+    // [해결] 객체 인식 결과(Bounding Box) 외곽의 노이즈를 쳐내기 위한 마스크 범위 제한 (Cropping) 및 채널 접근 인덱스 보강
+    private fun generateYoloMask(coeffs: FloatArray, protos: FloatArray, maskW: Int, maskH: Int, maskC: Int, isProtoNHWC: Boolean, cx: Float, cy: Float, bw: Float, bh: Float): Bitmap {
         val pixels = ByteArray(maskW * maskH)
-        for (y in 0 until maskH) for (x in 0 until maskW) {
-            var sum = 0f; val offset = (y * maskW + x) * 32
-            for (i in 0 until 32) if (offset + i < protos.size) sum += coeffs[i] * protos[offset + i]
-            val sig = 1.0f / (1.0f + exp(-sum.toDouble())).toFloat()
-            pixels[y * maskW + x] = (if (sig > 0.5f) 255 else 0).toByte()
+
+        val scaleX = if (cx > 2f || bw > 2f) 640f else 1f
+        val scaleY = if (cy > 2f || bh > 2f) 640f else 1f
+
+        val maskLeft = ((cx - bw / 2) * maskW / scaleX).toInt().coerceIn(0, maskW - 1)
+        val maskTop = ((cy - bh / 2) * maskH / scaleY).toInt().coerceIn(0, maskH - 1)
+        val maskRight = ((cx + bw / 2) * maskW / scaleX).toInt().coerceIn(0, maskW - 1)
+        val maskBottom = ((cy + bh / 2) * maskH / scaleY).toInt().coerceIn(0, maskH - 1)
+
+        val spatialSize = maskW * maskH
+        for (y in 0 until maskH) {
+            for (x in 0 until maskW) {
+                if (x in maskLeft..maskRight && y in maskTop..maskBottom) {
+                    var sum = 0f
+                    val spatialIdx = y * maskW + x
+                    for (c in 0 until maskC) {
+                        val protoVal = if (isProtoNHWC) {
+                            protos[spatialIdx * maskC + c]
+                        } else {
+                            protos[c * spatialSize + spatialIdx]
+                        }
+                        sum += coeffs[c] * protoVal
+                    }
+                    val sig = 1.0f / (1.0f + exp(-sum.toDouble())).toFloat()
+                    pixels[spatialIdx] = (if (sig > 0.5f) 255 else 0).toByte()
+                }
+            }
         }
         val mask = Bitmap.createBitmap(maskW, maskH, Bitmap.Config.ALPHA_8)
-        mask.copyPixelsFromBuffer(ByteBuffer.wrap(pixels)); return mask
+        mask.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
+        return mask
     }
 
     private fun generateYolactMask(coeffs: FloatArray, protos: ByteBuffer): Bitmap {
