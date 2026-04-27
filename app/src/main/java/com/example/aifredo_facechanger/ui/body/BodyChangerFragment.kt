@@ -469,7 +469,6 @@ class BodyChangerFragment : Fragment() {
             yolo26nImageProcessor = ImageProcessor.Builder().add(ResizeOp(640, 640, ResizeOp.ResizeMethod.BILINEAR)).add(NormalizeOp(0f, 255f)).build()
             yolo26nTensorImage = TensorImage(DataType.FLOAT32)
 
-            // [해결] 텐서 차원을 강제 인덱싱하지 않고 3차원이면 Detect, 4차원이면 Proto로 인식하도록 분기 처리
             val shape0 = interpreter.getOutputTensor(0).shape()
             if (shape0.size == 3) {
                 yolo26nIdxDetect = 0; yolo26nIdxProto = 1
@@ -870,7 +869,6 @@ class BodyChangerFragment : Fragment() {
         val detectShape = detectTensor.shape()
         val protoShape = protoTensor.shape()
 
-        // [해결] 텐서 크기와 깊이에 따라 Transpose 여부와 앵커 차원을 유동적으로 획득
         val dDims = detectShape.size
         val numAnchors = Math.max(detectShape[dDims - 1], detectShape[dDims - 2])
         val numFeatures = Math.min(detectShape[dDims - 1], detectShape[dDims - 2])
@@ -888,32 +886,30 @@ class BodyChangerFragment : Fragment() {
         detectBuffer?.rewind(); val fbDet = detectBuffer?.asFloatBuffer() ?: return
         val detData = FloatArray(fbDet.remaining()); fbDet.get(detData)
 
-        // 클래스 개수 계산 및 음수 방어
-        val numClasses = numFeatures - maskC - 4
-        if (numFeatures < 5 || numClasses < 1) {
+        if (numFeatures < 5) {
             fallbackToEmptyMask(bitmap)
             return
         }
 
-        // [해결] 모델의 첫번째 클래스가 Person이 아닐 수 있으므로 전체 클래스에서 Max Score 도출
+        // 전체 클래스를 순회하지 않고 사람 클래스(보통 0번)에 대해서만 검사합니다.
+        val targetClassIdx = 0
         var maxScore = 0f
         var bestIdx = -1
+
         for (i in 0 until numAnchors) {
-            for (c in 0 until numClasses) {
-                val score = if (isDetectTransposed) {
-                    detData[i * numFeatures + 4 + c]
-                } else {
-                    detData[(4 + c) * numAnchors + i]
-                }
-                if (score > maxScore) {
-                    maxScore = score
-                    bestIdx = i
-                }
+            val score = if (isDetectTransposed) {
+                detData[i * numFeatures + 4 + targetClassIdx]
+            } else {
+                detData[(4 + targetClassIdx) * numAnchors + i]
+            }
+            if (score > maxScore) {
+                maxScore = score
+                bestIdx = i
             }
         }
 
         if (bestIdx != -1 && maxScore > 0.20f) {
-            val maskStartIndex = 4 + numClasses
+            val maskStartIndex = numFeatures - maskC
             val coeffs = FloatArray(maskC)
             for (i in 0 until maskC) {
                 coeffs[i] = if (isDetectTransposed) {
@@ -940,7 +936,6 @@ class BodyChangerFragment : Fragment() {
         }
     }
 
-    // [해결] 객체 인식 결과(Bounding Box) 외곽의 노이즈를 쳐내기 위한 마스크 범위 제한 (Cropping) 및 채널 접근 인덱스 보강
     private fun generateYoloMask(coeffs: FloatArray, protos: FloatArray, maskW: Int, maskH: Int, maskC: Int, isProtoNHWC: Boolean, cx: Float, cy: Float, bw: Float, bh: Float): Bitmap {
         val pixels = ByteArray(maskW * maskH)
 
@@ -955,9 +950,9 @@ class BodyChangerFragment : Fragment() {
         val spatialSize = maskW * maskH
         for (y in 0 until maskH) {
             for (x in 0 until maskW) {
+                val spatialIdx = y * maskW + x
                 if (x in maskLeft..maskRight && y in maskTop..maskBottom) {
                     var sum = 0f
-                    val spatialIdx = y * maskW + x
                     for (c in 0 until maskC) {
                         val protoVal = if (isProtoNHWC) {
                             protos[spatialIdx * maskC + c]
@@ -968,6 +963,8 @@ class BodyChangerFragment : Fragment() {
                     }
                     val sig = 1.0f / (1.0f + exp(-sum.toDouble())).toFloat()
                     pixels[spatialIdx] = (if (sig > 0.5f) 255 else 0).toByte()
+                } else {
+                    pixels[spatialIdx] = 0
                 }
             }
         }
