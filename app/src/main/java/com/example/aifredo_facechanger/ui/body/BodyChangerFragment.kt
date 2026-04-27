@@ -175,6 +175,9 @@ class BodyChangerFragment : Fragment() {
 
     private var maxMem = 0L
     private var maxCpu = 0.0
+    private var cpuSum = 0.0
+    private var memSum = 0L
+    private var metricSampleCount = 0
     private var lastCpuTime = 0L
     private var lastSampleTime = 0L
     private val perfHandler = Handler(Looper.getMainLooper())
@@ -315,10 +318,17 @@ class BodyChangerFragment : Fragment() {
         lastCpuTime = currentCpuTime
         lastSampleTime = currentTime
 
+        // Calculate averages
+        metricSampleCount++
+        cpuSum += cpuUsage
+        memSum += usedMem
+        val avgCpu = cpuSum / metricSampleCount
+        val avgMem = memSum / metricSampleCount
+
         binding.perfText.text = String.format(
             Locale.getDefault(),
-            "CPU: %.1f%%\nMEM: %dMB (Peak: %dMB)\nGPU: %s",
-            cpuUsage, usedMem, maxMem, if (gpuDelegate != null || yoloxGpuDelegate != null) "Active" else if (nnApiDelegate != null) "NNAPI" else "Off"
+            "CPU: %.1f%% (Peak: %.1f%%, Avg: %.1f%%)\nMEM: %dMB (Peak: %dMB, Avg: %dMB)\nGPU: %s",
+            cpuUsage, maxCpu, avgCpu, usedMem, maxMem, avgMem.toInt(), if (gpuDelegate != null || yoloxGpuDelegate != null) "Active" else if (nnApiDelegate != null) "NNAPI" else "Off"
         )
     }
 
