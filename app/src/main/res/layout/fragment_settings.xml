@@ -373,6 +373,15 @@
                     android:text="Mirror Mode (Swap Left/Right)"
                     android:textSize="18sp" />
 
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/switch_body_half_boundary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="16dp"
+                    android:text="Half boundary On / Off"
+                    android:textSize="18sp"
+                    android:checked="true" />
+
             </LinearLayout>
         </ScrollView>
 

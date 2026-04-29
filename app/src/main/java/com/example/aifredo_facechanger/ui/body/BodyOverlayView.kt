@@ -20,6 +20,7 @@ class BodyOverlayView @JvmOverloads constructor(
     private var startColor: Int = Color.RED
     private var endColor: Int = Color.BLUE
     private var isMirrorMode: Boolean = false
+    private var isHalfBoundary: Boolean = true
     private var boundingBox: RectF? = null
 
     private val gradientPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -37,7 +38,7 @@ class BodyOverlayView @JvmOverloads constructor(
     // [핵심 변경] 사용이 끝난 비트맵을 즉시 날리지 않고, 그리기(onDraw)가 끝날 때까지 대기시키는 안전 큐
     private val recycleQueue = ConcurrentLinkedQueue<Bitmap>()
 
-    fun updateData(mask: Bitmap?, original: Bitmap?, startCol: Int, endCol: Int, isMirror: Boolean = false) {
+    fun updateData(mask: Bitmap?, original: Bitmap?, startCol: Int, endCol: Int, isMirror: Boolean = false, isHalf: Boolean = true) {
         // 새 데이터가 들어오면, 기존 데이터는 재활용 큐로 밀어넣음
         if (maskBitmap != null && maskBitmap != mask) {
             recycleQueue.add(maskBitmap)
@@ -53,22 +54,24 @@ class BodyOverlayView @JvmOverloads constructor(
         this.startColor = startCol
         this.endColor = endCol
         this.isMirrorMode = isMirror
+        this.isHalfBoundary = isHalf
 
         postInvalidate()
     }
 
-    fun updateBoundingBox(box: RectF?, original: Bitmap?, isMirror: Boolean = false) {
+    fun updateBoundingBox(box: RectF?, original: Bitmap?, isMirror: Boolean = false, isHalf: Boolean = true) {
         if (backgroundBitmap != null && backgroundBitmap != original) {
             recycleQueue.add(backgroundBitmap)
         }
         backgroundBitmap = original
         boundingBox = box
         this.isMirrorMode = isMirror
+        this.isHalfBoundary = isHalf
         postInvalidate()
     }
 
-    fun updateMaskOnly(mask: Bitmap?, startCol: Int, endCol: Int, isMirror: Boolean = false) {
-        updateData(mask, null, startCol, endCol, isMirror)
+    fun updateMaskOnly(mask: Bitmap?, startCol: Int, endCol: Int, isMirror: Boolean = false, isHalf: Boolean = true) {
+        updateData(mask, null, startCol, endCol, isMirror, isHalf)
     }
 
     fun clearMemory() {
@@ -105,13 +108,15 @@ class BodyOverlayView @JvmOverloads constructor(
                 lastEndColor = endColor
             }
 
-            val halfWidth = vw / 2f
             canvas.save()
 
-            if (isMirrorMode) {
-                canvas.clipRect(0f, 0f, halfWidth, vh)
-            } else {
-                canvas.clipRect(halfWidth, 0f, vw, vh)
+            if (isHalfBoundary) {
+                val halfWidth = vw / 2f
+                if (isMirrorMode) {
+                    canvas.clipRect(0f, 0f, halfWidth, vh)
+                } else {
+                    canvas.clipRect(halfWidth, 0f, vw, vh)
+                }
             }
 
             drawScaledBitmap(canvas, mask, vw, vh, gradientPaint)
@@ -120,12 +125,14 @@ class BodyOverlayView @JvmOverloads constructor(
 
         // 3. 바운딩 박스 그리기
         if (box != null && bg != null && !bg.isRecycled) {
-            val halfWidth = vw / 2f
             canvas.save()
-            if (isMirrorMode) {
-                canvas.clipRect(0f, 0f, halfWidth, vh)
-            } else {
-                canvas.clipRect(halfWidth, 0f, vw, vh)
+            if (isHalfBoundary) {
+                val halfWidth = vw / 2f
+                if (isMirrorMode) {
+                    canvas.clipRect(0f, 0f, halfWidth, vh)
+                } else {
+                    canvas.clipRect(halfWidth, 0f, vw, vh)
+                }
             }
             
             val bw = bg.width.toFloat()

@@ -160,6 +160,11 @@ class SettingsFragment : Fragment() {
             sharedPref.edit().putBoolean("body_mirror_mode", isChecked).apply()
         }
 
+        binding.switchBodyHalfBoundary.isChecked = sharedPref.getBoolean("body_half_boundary", true)
+        binding.switchBodyHalfBoundary.setOnCheckedChangeListener { _, isChecked ->
+            sharedPref.edit().putBoolean("body_half_boundary", isChecked).apply()
+        }
+
         // --- CAM Settings ---
         val camSource = sharedPref.getString("cam_source", "Embedded")
         if (camSource == "RTSP") {

@@ -62,6 +62,7 @@ import org.tensorflow.lite.support.image.ops.ResizeOp
 import org.tensorflow.lite.support.common.ops.NormalizeOp
 import org.tensorflow.lite.DataType
 import com.google.mediapipe.framework.image.BitmapImageBuilder
+import com.google.mediapipe.framework.image.MPImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -161,6 +162,7 @@ class BodyChangerFragment : Fragment() {
     private var actualDelegate: String = "CPU"
     private var rtspQuality: String = "High"
     private var isMirrorMode: Boolean = false
+    private var isHalfBoundary: Boolean = true
     private var lastMediaPipeTimestamp = -1L
 
     private val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
@@ -251,6 +253,7 @@ class BodyChangerFragment : Fragment() {
         isRtspMode = sharedPref.getString("cam_source", "Embedded") == "RTSP"
         rtspQuality = sharedPref.getString("rtsp_quality", "High") ?: "High"
         isMirrorMode = sharedPref.getBoolean("body_mirror_mode", false)
+        isHalfBoundary = sharedPref.getBoolean("body_half_boundary", true)
         try {
             startColor = Color.parseColor(startColorStr)
             endColor = Color.parseColor(endColorStr)
@@ -325,10 +328,14 @@ class BodyChangerFragment : Fragment() {
         val avgCpu = cpuSum / metricSampleCount
         val avgMem = memSum / metricSampleCount
 
+        val isGpuActive = gpuDelegate != null || yoloxGpuDelegate != null || actualDelegate.contains("GPU", ignoreCase = true)
+        val isNnapiActive = nnApiDelegate != null || actualDelegate.contains("NNAPI", ignoreCase = true)
+
         binding.perfText.text = String.format(
             Locale.getDefault(),
             "CPU: %.1f%% (Peak: %.1f%%, Avg: %.1f%%)\nMEM: %dMB (Peak: %dMB, Avg: %dMB)\nGPU: %s",
-            cpuUsage, maxCpu, avgCpu, usedMem, maxMem, avgMem.toInt(), if (gpuDelegate != null || yoloxGpuDelegate != null) "Active" else if (nnApiDelegate != null) "NNAPI" else "Off"
+            cpuUsage, maxCpu, avgCpu, usedMem, maxMem, avgMem.toInt(), 
+            if (isGpuActive) "Active" else if (isNnapiActive) "NNAPI" else "Off"
         )
     }
 
@@ -397,7 +404,31 @@ class BodyChangerFragment : Fragment() {
             poseLandmarker = PoseLandmarker.createFromOptions(requireContext(), optionsBuilder.build())
             actualDelegate = selectedDelegate
             addLog(">> MediaPipe Pose Ready ($actualDelegate)")
-        } catch (e: Exception) { addLog("MediaPipe Pose Init Error: ${e.message}") }
+        } catch (e: Exception) {
+            addLog("MediaPipe Pose Init Error: ${e.message}")
+            if (selectedDelegate.uppercase() == "GPU") {
+                addLog("GPU Init failed, falling back to CPU...")
+                try {
+                    val baseOptionsBuilder = BaseOptions.builder().setModelAssetPath("pose_landmarker_lite.task")
+                    baseOptionsBuilder.setDelegate(Delegate.CPU)
+                    val optionsBuilder = PoseLandmarker.PoseLandmarkerOptions.builder()
+                        .setBaseOptions(baseOptionsBuilder.build())
+                        .setRunningMode(RunningMode.VIDEO)
+                        .setOutputSegmentationMasks(true)
+                        .setMinPoseDetectionConfidence(0.2f)
+                        .setMinPosePresenceConfidence(0.4f)
+                        .setMinTrackingConfidence(0.4f)
+                    poseLandmarker = PoseLandmarker.createFromOptions(requireContext(), optionsBuilder.build())
+                    actualDelegate = "CPU (Fallback)"
+                    addLog(">> MediaPipe Pose Ready ($actualDelegate)")
+                } catch (e2: Exception) {
+                    addLog("Fallback Failed: ${e2.message}")
+                    actualDelegate = "Error"
+                }
+            } else {
+                actualDelegate = "Error"
+            }
+        }
     }
 
     private fun initMlKit() {
@@ -715,7 +746,7 @@ class BodyChangerFragment : Fragment() {
     private fun fallbackToEmptyMask(bitmap: Bitmap) {
         val emptyMask = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
         activity?.runOnUiThread {
-            _binding?.bodyOverlay?.updateData(emptyMask, bitmap, startColor, endColor, isMirrorMode)
+            _binding?.bodyOverlay?.updateData(emptyMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary)
             isProcessing.set(false)
         }
     }
@@ -779,15 +810,36 @@ class BodyChangerFragment : Fragment() {
                     }
 
                     byteBuffer.rewind()
-
                     val pixels = ByteArray(width * height)
-                    if (byteBuffer.capacity() >= width * height * 4) {
+                    
+                    val maskFormat = if (mask.containedImageProperties.isNotEmpty()) mask.containedImageProperties[0].imageFormat else -1
+
+                    if (maskFormat == MPImage.IMAGE_FORMAT_RGBA) {
+                        // GPU 가속 모드: RGBA_8888 포맷 (픽셀당 4바이트)
+                        // 내부가 채워지도록 R, G, B, A 중 최대값을 사용
+                        for (i in 0 until width * height) {
+                            var maxVal = 0
+                            for (j in 0 until 4) {
+                                if (byteBuffer.hasRemaining()) {
+                                    val v = byteBuffer.get().toInt() and 0xFF
+                                    if (v > maxVal) maxVal = v
+                                }
+                            }
+                            pixels[i] = if (maxVal > 128) 255.toByte() else 0.toByte()
+                        }
+                    } else if (maskFormat == MPImage.IMAGE_FORMAT_VEC32F1) {
+                        // CPU/NNAPI 모드: Float32 포맷 (픽셀당 1개 float, 0.0~1.0)
                         val floatBuffer = byteBuffer.asFloatBuffer()
                         for (i in 0 until width * height) {
-                            pixels[i] = (if (floatBuffer.get() > 0.5f) 255 else 0).toByte()
+                            if (floatBuffer.hasRemaining()) {
+                                pixels[i] = if (floatBuffer.get() > 0.5f) 255.toByte() else 0.toByte()
+                            }
                         }
                     } else {
-                        byteBuffer.get(pixels)
+                        // 기타 포맷 (Gray8 등)
+                        if (byteBuffer.capacity() >= width * height) {
+                            byteBuffer.get(pixels)
+                        }
                     }
 
                     val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
@@ -797,7 +849,7 @@ class BodyChangerFragment : Fragment() {
                     } else maskBitmap
 
                     activity?.runOnUiThread {
-                        _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode)
+                        _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary)
                         isProcessing.set(false)
                     }
                 } else {
@@ -821,7 +873,7 @@ class BodyChangerFragment : Fragment() {
                 for (i in 0 until w * h) if (maskBuffer.hasRemaining()) pixelsArr[i] = (if (maskBuffer.float > 0.45f) 255 else 0).toByte()
                 val maskBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
                 maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixelsArr))
-                activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(maskBitmap, bitmap, startColor, endColor, isMirrorMode); isProcessing.set(false) }
+                activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(maskBitmap, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
             }
             .addOnFailureListener {
                 fallbackToEmptyMask(bitmap)
@@ -852,7 +904,7 @@ class BodyChangerFragment : Fragment() {
                 val fbCoeffs = yolactOutputCoeffs?.asFloatBuffer(); fbCoeffs?.position(bestIdx * 32); fbCoeffs?.get(coeffs)
                 val mask = generateYolactMask(coeffs, yolactOutputProtos!!)
                 val finalMask = if (mask.width != bitmap.width) Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true).also { mask.recycle() } else mask
-                activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode); isProcessing.set(false) }
+                activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
                 return
             }
         }
@@ -940,7 +992,7 @@ class BodyChangerFragment : Fragment() {
             val maskBitmap = generateYoloMask(coeffs, protos, maskW, maskH, maskC, isProtoNHWC, cx, cy, bw, bh)
             val finalMask = Bitmap.createScaledBitmap(maskBitmap, bitmap.width, bitmap.height, true)
             maskBitmap.recycle()
-            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode); isProcessing.set(false) }
+            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
         } else {
             fallbackToEmptyMask(bitmap)
         }
@@ -1011,10 +1063,10 @@ class BodyChangerFragment : Fragment() {
         }
         modnetOutputBuffer?.rewind(); val fb = modnetOutputBuffer?.asFloatBuffer() ?: return
         val pixels = reusableMaskPixels!!; pixels.clear()
-        for (i in 0 until (256 * 256)) if (fb.hasRemaining()) pixels.put((if (fb.get() > 0.4f) 255 else 0).toByte())
+        for (i in 0 until (256 * 256)) if (fb.get() > 0.4f) pixels.put(255.toByte()) else pixels.put(0.toByte())
         val mask = Bitmap.createBitmap(256, 256, Bitmap.Config.ALPHA_8); pixels.rewind(); mask.copyPixelsFromBuffer(pixels)
         val finalMask = if (mask.width != bitmap.width) Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true).also { mask.recycle() } else mask
-        activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode); isProcessing.set(false) }
+        activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
     }
 
     private fun processYoloxTiny(bitmap: Bitmap) {
@@ -1043,7 +1095,7 @@ class BodyChangerFragment : Fragment() {
             }
         }
         if (bestBox != null) {
-            activity?.runOnUiThread { _binding?.bodyOverlay?.updateBoundingBox(bestBox, bitmap, isMirrorMode); isProcessing.set(false) }
+            activity?.runOnUiThread { _binding?.bodyOverlay?.updateBoundingBox(bestBox, bitmap, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
         } else {
             fallbackToEmptyMask(bitmap)
         }
@@ -1121,7 +1173,7 @@ class BodyChangerFragment : Fragment() {
             rvmMaskBitmap!!.copyPixelsFromBuffer(pixels)
             val fullMask = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
             Canvas(fullMask).drawBitmap(rvmMaskBitmap!!, null, Rect(left, top, right, bottom), null)
-            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(fullMask, bitmap, startColor, endColor, isMirrorMode); isProcessing.set(false) }
+            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(fullMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
         } else {
             cropped.recycle()
             fallbackToEmptyMask(bitmap)
@@ -1171,7 +1223,7 @@ class BodyChangerFragment : Fragment() {
             val pixels = reusableMaskPixels!!; pixels.clear(); pixels.put(byteArr); pixels.rewind()
             rvmMaskBitmap!!.copyPixelsFromBuffer(pixels)
             val finalMask = if (rvmMaskBitmap!!.width != bitmap.width) Bitmap.createScaledBitmap(rvmMaskBitmap!!, bitmap.width, bitmap.height, true) else rvmMaskBitmap!!
-            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode); isProcessing.set(false) }
+            activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
         } else {
             fallbackToEmptyMask(bitmap)
         }
