@@ -273,6 +273,12 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="RVM 720x1280\n(Framework: TFLite, Backbone: ResNet-50, Model: Float16)" />
+
+                    <RadioButton
+                        android:id="@+id/radio_body_rvm_flexable"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/settings_body_model_rvm_flexable" />
                 </RadioGroup>
 
                 <TextView

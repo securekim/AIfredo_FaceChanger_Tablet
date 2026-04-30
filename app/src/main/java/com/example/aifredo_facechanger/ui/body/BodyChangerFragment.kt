@@ -129,6 +129,7 @@ class BodyChangerFragment : Fragment() {
     private var rvmRatioBuffer: ByteBuffer? = null
     private var rvmByteArray: ByteArray? = null
     private var rvmMaskBitmap: Bitmap? = null
+    private var scaledMaskBitmap: Bitmap? = null
 
     private var rvmH: Int = 192
     private var rvmW: Int = 320
@@ -172,6 +173,7 @@ class BodyChangerFragment : Fragment() {
     private val yolo26nModelFile = "yolo26n-seg_float16.tflite"
     private val modnetModelFile = "MODNet_256x256_model_float16_quant.tflite"
     private var rvmModelFile = "rvm_resnet50_192x320_model_float16_quant.tflite"
+    private val rvmFlexableModelFile = "RVM_MobileNetv3_FP16_Flexable.tflite"
     private val yoloxHybridModelFile = "yolox_n_body_head_hand_post_0461_0.4428_1x3x256x320_float16.tflite"
     private val yoloxTinyModelFile = "yolox_tiny_320x320_model_float16_quant.tflite"
 
@@ -254,6 +256,10 @@ class BodyChangerFragment : Fragment() {
         rtspQuality = sharedPref.getString("rtsp_quality", "High") ?: "High"
         isMirrorMode = sharedPref.getBoolean("body_mirror_mode", false)
         isHalfBoundary = sharedPref.getBoolean("body_half_boundary", true)
+
+        // Half Boundary 여부에 따라 중앙 세로선(divider) 표시 제어
+        binding.divider.visibility = if (isHalfBoundary) View.VISIBLE else View.GONE
+
         try {
             startColor = Color.parseColor(startColorStr)
             endColor = Color.parseColor(endColorStr)
@@ -262,10 +268,10 @@ class BodyChangerFragment : Fragment() {
             endColor = Color.BLUE
         }
 
-        rvmModelFile = if (selectedModel == "RVM 720x1280") {
-            "rvm_resnet50_720x1280_model_float16_quant.tflite"
-        } else {
-            "rvm_resnet50_192x320_model_float16_quant.tflite"
+        rvmModelFile = when (selectedModel) {
+            "RVM 720x1280" -> "rvm_resnet50_720x1280_model_float16_quant.tflite"
+            "RVM Flexable" -> rvmFlexableModelFile
+            else -> "rvm_resnet50_192x320_model_float16_quant.tflite"
         }
     }
 
@@ -290,7 +296,7 @@ class BodyChangerFragment : Fragment() {
                         }
                         "YOLOX tiny" -> initYolox(yoloxTinyModelFile)
                         "MODNet" -> initModNet()
-                        "RVM 192x320", "RVM 720x1280", "RVM" -> initRvm()
+                        "RVM 192x320", "RVM 720x1280", "RVM", "RVM Flexable" -> initRvm()
                         "ML Kit" -> initMlKit()
                         else -> initMediaPipePose()
                     }
@@ -321,7 +327,6 @@ class BodyChangerFragment : Fragment() {
         lastCpuTime = currentCpuTime
         lastSampleTime = currentTime
 
-        // Calculate averages
         metricSampleCount++
         cpuSum += cpuUsage
         memSum += usedMem
@@ -334,7 +339,7 @@ class BodyChangerFragment : Fragment() {
         binding.perfText.text = String.format(
             Locale.getDefault(),
             "CPU: %.1f%% (Peak: %.1f%%, Avg: %.1f%%)\nMEM: %dMB (Peak: %dMB, Avg: %dMB)\nGPU: %s",
-            cpuUsage, maxCpu, avgCpu, usedMem, maxMem, avgMem.toInt(), 
+            cpuUsage, maxCpu, avgCpu, usedMem, maxMem, avgMem.toInt(),
             if (isGpuActive) "Active" else if (isNnapiActive) "NNAPI" else "Off"
         )
     }
@@ -353,6 +358,7 @@ class BodyChangerFragment : Fragment() {
             nnApiDelegate?.close(); nnApiDelegate = null
             rtspBitmapBuffer?.recycle(); rtspBitmapBuffer = null
             rvmMaskBitmap?.recycle(); rvmMaskBitmap = null
+            scaledMaskBitmap?.recycle(); scaledMaskBitmap = null
             rvmInputs = null; rvmOutputs = null
             rvmImageProcessor = null; rvmTensorImage = null
             rvmNchwBuffer = null; rvmInputArr = null
@@ -565,38 +571,111 @@ class BodyChangerFragment : Fragment() {
             val modelFile = FileUtil.loadMappedFile(requireContext(), rvmModelFile)
             rvmInterpreter = Interpreter(modelFile, getInterpreterOptions())
             rvmIdxSrc = -1; rvmIdxRatio = -1; rvmIdxFgr = -1; rvmIdxPha = -1
-            val inputStates = mutableListOf<Pair<Int, Int>>()
-            for (i in 0 until rvmInterpreter!!.inputTensorCount) {
-                val shape = rvmInterpreter!!.getInputTensor(i).shape()
-                if (shape.size == 4) {
-                    if (shape[1] == 3 || shape[3] == 3) rvmIdxSrc = i
-                    else inputStates.add(Pair(i, shape[1] * shape[2] * shape[3]))
-                } else if (shape.size == 1) rvmIdxRatio = i
-            }
-            inputStates.sortByDescending { it.second }
-            rvmIdxR1i = inputStates.getOrNull(0)?.first ?: -1
-            rvmIdxR2i = inputStates.getOrNull(1)?.first ?: -1
-            rvmIdxR3i = inputStates.getOrNull(2)?.first ?: -1
-            rvmIdxR4i = inputStates.getOrNull(3)?.first ?: -1
+            rvmIdxR1i = -1; rvmIdxR2i = -1; rvmIdxR3i = -1; rvmIdxR4i = -1
+            rvmIdxR1o = -1; rvmIdxR2o = -1; rvmIdxR3o = -1; rvmIdxR4o = -1
 
-            val outputStates = mutableListOf<Pair<Int, Int>>()
+            for (i in 0 until rvmInterpreter!!.inputTensorCount) {
+                val name = rvmInterpreter!!.getInputTensor(i).name().lowercase()
+                if (name.contains("src") || name.contains("image")) rvmIdxSrc = i
+                else if (name.contains("r1i")) rvmIdxR1i = i
+                else if (name.contains("r2i")) rvmIdxR2i = i
+                else if (name.contains("r3i")) rvmIdxR3i = i
+                else if (name.contains("r4i")) rvmIdxR4i = i
+                else if (name.contains("ratio") || name.contains("downsample")) rvmIdxRatio = i
+            }
+
             for (i in 0 until rvmInterpreter!!.outputTensorCount) {
-                val shape = rvmInterpreter!!.getOutputTensor(i).shape()
-                if (shape.size == 4) {
-                    if (shape[1] == 1 || shape[3] == 1) rvmIdxPha = i
-                    else if (shape[1] == 3 || shape[3] == 3) rvmIdxFgr = i
-                    else outputStates.add(Pair(i, shape[1] * shape[2] * shape[3]))
+                val name = rvmInterpreter!!.getOutputTensor(i).name().lowercase()
+                if (name.contains("fgr")) rvmIdxFgr = i
+                else if (name.contains("pha")) rvmIdxPha = i
+                else if (name.contains("r1o")) rvmIdxR1o = i
+                else if (name.contains("r2o")) rvmIdxR2o = i
+                else if (name.contains("r3o")) rvmIdxR3o = i
+                else if (name.contains("r4o")) rvmIdxR4o = i
+            }
+
+            if (rvmIdxSrc != -1) {
+                val srcShape = rvmInterpreter!!.getInputTensor(rvmIdxSrc).shape()
+                isRvmNCHW = srcShape.size == 4 && (srcShape[1] == 3 || (srcShape[1] <= 0 && srcShape[3] != 3))
+            } else {
+                isRvmNCHW = true
+                for (i in 0 until rvmInterpreter!!.inputTensorCount) {
+                    val shape = rvmInterpreter!!.getInputTensor(i).shape()
+                    if (shape.size == 4 && (shape[1] == 3 || shape[3] == 3)) {
+                        rvmIdxSrc = i
+                        isRvmNCHW = shape[1] == 3
+                        break
+                    }
                 }
             }
-            outputStates.sortByDescending { it.second }
-            rvmIdxR1o = outputStates.getOrNull(0)?.first ?: -1
-            rvmIdxR2o = outputStates.getOrNull(1)?.first ?: -1
-            rvmIdxR3o = outputStates.getOrNull(2)?.first ?: -1
-            rvmIdxR4o = outputStates.getOrNull(3)?.first ?: -1
+
+            if (rvmIdxR1i == -1) {
+                val inputStates = mutableListOf<Pair<Int, Int>>()
+                for (i in 0 until rvmInterpreter!!.inputTensorCount) {
+                    if (i == rvmIdxSrc || i == rvmIdxRatio) continue
+                    val shape = rvmInterpreter!!.getInputTensor(i).shape()
+                    if (shape.size == 4) {
+                        val c = if (isRvmNCHW) shape[1] else shape[3]
+                        inputStates.add(Pair(i, c))
+                    } else if (shape.size == 1 && rvmIdxRatio == -1) {
+                        rvmIdxRatio = i
+                    }
+                }
+                inputStates.sortBy { if (it.second <= 0) it.first else it.second }
+                rvmIdxR1i = inputStates.getOrNull(0)?.first ?: -1
+                rvmIdxR2i = inputStates.getOrNull(1)?.first ?: -1
+                rvmIdxR3i = inputStates.getOrNull(2)?.first ?: -1
+                rvmIdxR4i = inputStates.getOrNull(3)?.first ?: -1
+            }
+
+            if (rvmIdxR1o == -1) {
+                val outputStates = mutableListOf<Pair<Int, Int>>()
+                for (i in 0 until rvmInterpreter!!.outputTensorCount) {
+                    if (i == rvmIdxFgr || i == rvmIdxPha) continue
+                    val shape = rvmInterpreter!!.getOutputTensor(i).shape()
+                    if (shape.size == 4) {
+                        val c = if (isRvmNCHW) shape[1] else shape[3]
+                        if (c == 1) rvmIdxPha = i
+                        else if (c == 3) rvmIdxFgr = i
+                        else outputStates.add(Pair(i, c))
+                    }
+                }
+                outputStates.sortBy { if (it.second <= 0) it.second else it.second }
+                rvmIdxR1o = outputStates.getOrNull(0)?.first ?: -1
+                rvmIdxR2o = outputStates.getOrNull(1)?.first ?: -1
+                rvmIdxR3o = outputStates.getOrNull(2)?.first ?: -1
+                rvmIdxR4o = outputStates.getOrNull(3)?.first ?: -1
+            }
 
             val srcShape = rvmInterpreter!!.getInputTensor(rvmIdxSrc).shape()
-            isRvmNCHW = srcShape[1] == 3
             if (isRvmNCHW) { rvmH = srcShape[2]; rvmW = srcShape[3] } else { rvmH = srcShape[1]; rvmW = srcShape[2] }
+
+            if (rvmH <= 0 || rvmW <= 0 || selectedModel == "RVM Flexable") {
+                rvmH = if (selectedModel.contains("720")) 720 else 192
+                rvmW = if (selectedModel.contains("720")) 1280 else 320
+            }
+
+            if (isRvmNCHW) rvmInterpreter!!.resizeInput(rvmIdxSrc, intArrayOf(1, 3, rvmH, rvmW))
+            else rvmInterpreter!!.resizeInput(rvmIdxSrc, intArrayOf(1, rvmH, rvmW, 3))
+
+            val statesInIdx = intArrayOf(rvmIdxR1i, rvmIdxR2i, rvmIdxR3i, rvmIdxR4i)
+            val downsamples = intArrayOf(2, 4, 8, 16)
+            val defaultChannels = intArrayOf(16, 20, 40, 64)
+
+            for (i in 0..3) {
+                if (statesInIdx[i] != -1) {
+                    val shape = rvmInterpreter!!.getInputTensor(statesInIdx[i]).shape()
+                    var c = if (isRvmNCHW) shape[1] else shape[3]
+                    if (c <= 0) c = defaultChannels[i]
+
+                    val h = rvmH / downsamples[i]
+                    val w = rvmW / downsamples[i]
+                    if (isRvmNCHW) rvmInterpreter!!.resizeInput(statesInIdx[i], intArrayOf(1, c, h, w))
+                    else rvmInterpreter!!.resizeInput(statesInIdx[i], intArrayOf(1, h, w, c))
+                }
+            }
+
+            rvmInterpreter!!.allocateTensors()
 
             val statesIn = intArrayOf(rvmIdxR1i, rvmIdxR2i, rvmIdxR3i, rvmIdxR4i)
             for (i in 0..3) if (statesIn[i] != -1) {
@@ -771,7 +850,7 @@ class BodyChangerFragment : Fragment() {
                 "YOLOX + RVM" -> processYoloxHybrid(safeBitmap)
                 "YOLOX tiny" -> processYoloxTiny(safeBitmap)
                 "MODNet" -> processModNet(safeBitmap)
-                "RVM 192x320", "RVM 720x1280", "RVM" -> processRvm(safeBitmap)
+                "RVM 192x320", "RVM 720x1280", "RVM", "RVM Flexable" -> processRvm(safeBitmap)
                 "ML Kit" -> processMlKit(safeBitmap)
                 else -> fallbackToEmptyMask(safeBitmap)
             }
@@ -811,12 +890,10 @@ class BodyChangerFragment : Fragment() {
 
                     byteBuffer.rewind()
                     val pixels = ByteArray(width * height)
-                    
+
                     val maskFormat = if (mask.containedImageProperties.isNotEmpty()) mask.containedImageProperties[0].imageFormat else -1
 
                     if (maskFormat == MPImage.IMAGE_FORMAT_RGBA) {
-                        // GPU 가속 모드: RGBA_8888 포맷 (픽셀당 4바이트)
-                        // 내부가 채워지도록 R, G, B, A 중 최대값을 사용
                         for (i in 0 until width * height) {
                             var maxVal = 0
                             for (j in 0 until 4) {
@@ -828,7 +905,6 @@ class BodyChangerFragment : Fragment() {
                             pixels[i] = if (maxVal > 128) 255.toByte() else 0.toByte()
                         }
                     } else if (maskFormat == MPImage.IMAGE_FORMAT_VEC32F1) {
-                        // CPU/NNAPI 모드: Float32 포맷 (픽셀당 1개 float, 0.0~1.0)
                         val floatBuffer = byteBuffer.asFloatBuffer()
                         for (i in 0 until width * height) {
                             if (floatBuffer.hasRemaining()) {
@@ -836,7 +912,6 @@ class BodyChangerFragment : Fragment() {
                             }
                         }
                     } else {
-                        // 기타 포맷 (Gray8 등)
                         if (byteBuffer.capacity() >= width * height) {
                             byteBuffer.get(pixels)
                         }
@@ -844,9 +919,21 @@ class BodyChangerFragment : Fragment() {
 
                     val maskBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
                     maskBitmap.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
-                    val finalMask = if (width != bitmap.width || height != bitmap.height) {
-                        Bitmap.createScaledBitmap(maskBitmap, bitmap.width, bitmap.height, true).also { maskBitmap.recycle() }
-                    } else maskBitmap
+
+                    val finalMask: Bitmap
+                    if (width != bitmap.width || height != bitmap.height) {
+                        if (scaledMaskBitmap == null || scaledMaskBitmap!!.isRecycled || scaledMaskBitmap!!.width != bitmap.width || scaledMaskBitmap!!.height != bitmap.height) {
+                            scaledMaskBitmap?.recycle()
+                            scaledMaskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                        }
+                        val canvas = Canvas(scaledMaskBitmap!!)
+                        canvas.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR)
+                        canvas.drawBitmap(maskBitmap, null, Rect(0, 0, bitmap.width, bitmap.height), null)
+                        finalMask = scaledMaskBitmap!!
+                        maskBitmap.recycle()
+                    } else {
+                        finalMask = maskBitmap
+                    }
 
                     activity?.runOnUiThread {
                         _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary)
@@ -903,7 +990,22 @@ class BodyChangerFragment : Fragment() {
                 val coeffs = FloatArray(32); yolactOutputCoeffs?.rewind()
                 val fbCoeffs = yolactOutputCoeffs?.asFloatBuffer(); fbCoeffs?.position(bestIdx * 32); fbCoeffs?.get(coeffs)
                 val mask = generateYolactMask(coeffs, yolactOutputProtos!!)
-                val finalMask = if (mask.width != bitmap.width) Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true).also { mask.recycle() } else mask
+
+                val finalMask: Bitmap
+                if (mask.width != bitmap.width || mask.height != bitmap.height) {
+                    if (scaledMaskBitmap == null || scaledMaskBitmap!!.isRecycled || scaledMaskBitmap!!.width != bitmap.width || scaledMaskBitmap!!.height != bitmap.height) {
+                        scaledMaskBitmap?.recycle()
+                        scaledMaskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                    }
+                    val canvas = Canvas(scaledMaskBitmap!!)
+                    canvas.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR)
+                    canvas.drawBitmap(mask, null, Rect(0, 0, bitmap.width, bitmap.height), null)
+                    finalMask = scaledMaskBitmap!!
+                    mask.recycle()
+                } else {
+                    finalMask = mask
+                }
+
                 activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
                 return
             }
@@ -953,14 +1055,13 @@ class BodyChangerFragment : Fragment() {
             return
         }
 
-        // 전체 클래스를 순회하지 않고 사람 클래스(보통 0번)에 대해서만 검사합니다.
         val targetClassIdx = 0
         var maxScore = 0f
         var bestIdx = -1
 
         for (i in 0 until numAnchors) {
             val score = if (isDetectTransposed) {
-                detData[i * numFeatures + 4 + targetClassIdx]
+                detData[bestIdx * numFeatures + 4 + targetClassIdx]
             } else {
                 detData[(4 + targetClassIdx) * numAnchors + i]
             }
@@ -990,8 +1091,22 @@ class BodyChangerFragment : Fragment() {
             val protos = FloatArray(fbProto.remaining()); fbProto.get(protos)
 
             val maskBitmap = generateYoloMask(coeffs, protos, maskW, maskH, maskC, isProtoNHWC, cx, cy, bw, bh)
-            val finalMask = Bitmap.createScaledBitmap(maskBitmap, bitmap.width, bitmap.height, true)
-            maskBitmap.recycle()
+
+            val finalMask: Bitmap
+            if (maskBitmap.width != bitmap.width || maskBitmap.height != bitmap.height) {
+                if (scaledMaskBitmap == null || scaledMaskBitmap!!.isRecycled || scaledMaskBitmap!!.width != bitmap.width || scaledMaskBitmap!!.height != bitmap.height) {
+                    scaledMaskBitmap?.recycle()
+                    scaledMaskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                }
+                val canvas = Canvas(scaledMaskBitmap!!)
+                canvas.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR)
+                canvas.drawBitmap(maskBitmap, null, Rect(0, 0, bitmap.width, bitmap.height), null)
+                finalMask = scaledMaskBitmap!!
+                maskBitmap.recycle()
+            } else {
+                finalMask = maskBitmap
+            }
+
             activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
         } else {
             fallbackToEmptyMask(bitmap)
@@ -1065,7 +1180,22 @@ class BodyChangerFragment : Fragment() {
         val pixels = reusableMaskPixels!!; pixels.clear()
         for (i in 0 until (256 * 256)) if (fb.get() > 0.4f) pixels.put(255.toByte()) else pixels.put(0.toByte())
         val mask = Bitmap.createBitmap(256, 256, Bitmap.Config.ALPHA_8); pixels.rewind(); mask.copyPixelsFromBuffer(pixels)
-        val finalMask = if (mask.width != bitmap.width) Bitmap.createScaledBitmap(mask, bitmap.width, bitmap.height, true).also { mask.recycle() } else mask
+
+        val finalMask: Bitmap
+        if (mask.width != bitmap.width || mask.height != bitmap.height) {
+            if (scaledMaskBitmap == null || scaledMaskBitmap!!.isRecycled || scaledMaskBitmap!!.width != bitmap.width || scaledMaskBitmap!!.height != bitmap.height) {
+                scaledMaskBitmap?.recycle()
+                scaledMaskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+            }
+            val canvas = Canvas(scaledMaskBitmap!!)
+            canvas.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR)
+            canvas.drawBitmap(mask, null, Rect(0, 0, bitmap.width, bitmap.height), null)
+            finalMask = scaledMaskBitmap!!
+            mask.recycle()
+        } else {
+            finalMask = mask
+        }
+
         activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
     }
 
@@ -1171,8 +1301,16 @@ class BodyChangerFragment : Fragment() {
             for (i in 0 until totalPixels) byteArr[i] = (if (outArr[i] > 0.5f) 255 else 0).toByte()
             val pixels = reusableMaskPixels!!; pixels.clear(); pixels.put(byteArr); pixels.rewind()
             rvmMaskBitmap!!.copyPixelsFromBuffer(pixels)
-            val fullMask = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
-            Canvas(fullMask).drawBitmap(rvmMaskBitmap!!, null, Rect(left, top, right, bottom), null)
+
+            if (scaledMaskBitmap == null || scaledMaskBitmap!!.isRecycled || scaledMaskBitmap!!.width != bitmap.width || scaledMaskBitmap!!.height != bitmap.height) {
+                scaledMaskBitmap?.recycle()
+                scaledMaskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+            }
+            val canvas = Canvas(scaledMaskBitmap!!)
+            canvas.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR)
+            canvas.drawBitmap(rvmMaskBitmap!!, null, Rect(left, top, right, bottom), null)
+            val fullMask = scaledMaskBitmap!!
+
             activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(fullMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
         } else {
             cropped.recycle()
@@ -1212,6 +1350,7 @@ class BodyChangerFragment : Fragment() {
         try {
             interpreter.runForMultipleInputsOutputs(inputs, outputs); rvmStateToggle = nextToggle
         } catch (e: Exception) {
+            addLog("RVM Process Error: ${e.message}")
             fallbackToEmptyMask(bitmap)
             return
         }
@@ -1222,7 +1361,21 @@ class BodyChangerFragment : Fragment() {
             for (i in 0 until totalPixels) byteArr[i] = (if (outArr[i] > 0.5f) 255 else 0).toByte()
             val pixels = reusableMaskPixels!!; pixels.clear(); pixels.put(byteArr); pixels.rewind()
             rvmMaskBitmap!!.copyPixelsFromBuffer(pixels)
-            val finalMask = if (rvmMaskBitmap!!.width != bitmap.width) Bitmap.createScaledBitmap(rvmMaskBitmap!!, bitmap.width, bitmap.height, true) else rvmMaskBitmap!!
+
+            val finalMask: Bitmap
+            if (rvmMaskBitmap!!.width != bitmap.width || rvmMaskBitmap!!.height != bitmap.height) {
+                if (scaledMaskBitmap == null || scaledMaskBitmap!!.isRecycled || scaledMaskBitmap!!.width != bitmap.width || scaledMaskBitmap!!.height != bitmap.height) {
+                    scaledMaskBitmap?.recycle()
+                    scaledMaskBitmap = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
+                }
+                val canvas = Canvas(scaledMaskBitmap!!)
+                canvas.drawColor(0, android.graphics.PorterDuff.Mode.CLEAR)
+                canvas.drawBitmap(rvmMaskBitmap!!, null, Rect(0, 0, bitmap.width, bitmap.height), null)
+                finalMask = scaledMaskBitmap!!
+            } else {
+                finalMask = rvmMaskBitmap!!
+            }
+
             activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
         } else {
             fallbackToEmptyMask(bitmap)

@@ -111,6 +111,7 @@ class SettingsFragment : Fragment() {
             "MODNet" -> binding.radioBodyModnet.isChecked = true
             "RVM 192x320" -> binding.radioBodyRvm320.isChecked = true
             "RVM 720x1280" -> binding.radioBodyRvm1280.isChecked = true
+            "RVM Flexable" -> binding.radioBodyRvmFlexable.isChecked = true
             else -> binding.radioBodyMediapipePose.isChecked = true
         }
 
@@ -125,6 +126,7 @@ class SettingsFragment : Fragment() {
                 R.id.radio_body_modnet -> "MODNet"
                 R.id.radio_body_rvm_320 -> "RVM 192x320"
                 R.id.radio_body_rvm_1280 -> "RVM 720x1280"
+                R.id.radio_body_rvm_flexable -> "RVM Flexable"
                 else -> "MediaPipe Pose"
             }
             sharedPref.edit().putString("body_model", selected).apply()
