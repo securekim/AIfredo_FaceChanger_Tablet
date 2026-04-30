@@ -517,7 +517,7 @@ class BodyChangerFragment : Fragment() {
             yolo26nTensorImage = TensorImage(DataType.FLOAT32)
 
             val shape0 = interpreter.getOutputTensor(0).shape()
-            if (shape0.size == 3) {
+            if (shape0.size >= 3) {
                 yolo26nIdxDetect = 0; yolo26nIdxProto = 1
             } else {
                 yolo26nIdxDetect = 1; yolo26nIdxProto = 0
@@ -558,8 +558,14 @@ class BodyChangerFragment : Fragment() {
             }
             inter?.let {
                 val shape = it.getInputTensor(0).shape()
-                if (shape[1] == 3) { isYoloxNchw = true; yoloxH = shape[2]; yoloxW = shape[3] }
-                else { isYoloxNchw = false; yoloxH = shape[1]; yoloxW = shape[2] }
+                if (shape.size >= 4) {
+                    if (shape[1] == 3) { isYoloxNchw = true; yoloxH = shape[2]; yoloxW = shape[3] }
+                    else { isYoloxNchw = false; yoloxH = shape[1]; yoloxW = shape[2] }
+                } else {
+                    isYoloxNchw = false
+                    yoloxH = 256
+                    yoloxW = 320
+                }
                 yoloxOutputBuffer = ByteBuffer.allocateDirect(it.getOutputTensor(0).numBytes()).order(ByteOrder.nativeOrder())
                 yoloxInterpreter = it
             }
@@ -596,12 +602,12 @@ class BodyChangerFragment : Fragment() {
 
             if (rvmIdxSrc != -1) {
                 val srcShape = rvmInterpreter!!.getInputTensor(rvmIdxSrc).shape()
-                isRvmNCHW = srcShape.size == 4 && (srcShape[1] == 3 || (srcShape[1] <= 0 && srcShape[3] != 3))
+                isRvmNCHW = srcShape.size >= 4 && (srcShape[1] == 3 || (srcShape[1] <= 0 && srcShape[3] != 3))
             } else {
                 isRvmNCHW = true
                 for (i in 0 until rvmInterpreter!!.inputTensorCount) {
                     val shape = rvmInterpreter!!.getInputTensor(i).shape()
-                    if (shape.size == 4 && (shape[1] == 3 || shape[3] == 3)) {
+                    if (shape.size >= 4 && (shape[1] == 3 || shape[3] == 3)) {
                         rvmIdxSrc = i
                         isRvmNCHW = shape[1] == 3
                         break
@@ -614,11 +620,13 @@ class BodyChangerFragment : Fragment() {
                 for (i in 0 until rvmInterpreter!!.inputTensorCount) {
                     if (i == rvmIdxSrc || i == rvmIdxRatio) continue
                     val shape = rvmInterpreter!!.getInputTensor(i).shape()
-                    if (shape.size == 4) {
+                    if (shape.size >= 4) {
                         val c = if (isRvmNCHW) shape[1] else shape[3]
                         inputStates.add(Pair(i, c))
                     } else if (shape.size == 1 && rvmIdxRatio == -1) {
                         rvmIdxRatio = i
+                    } else {
+                        inputStates.add(Pair(i, -1))
                     }
                 }
                 inputStates.sortBy { if (it.second <= 0) it.first else it.second }
@@ -633,14 +641,16 @@ class BodyChangerFragment : Fragment() {
                 for (i in 0 until rvmInterpreter!!.outputTensorCount) {
                     if (i == rvmIdxFgr || i == rvmIdxPha) continue
                     val shape = rvmInterpreter!!.getOutputTensor(i).shape()
-                    if (shape.size == 4) {
+                    if (shape.size >= 4) {
                         val c = if (isRvmNCHW) shape[1] else shape[3]
                         if (c == 1) rvmIdxPha = i
                         else if (c == 3) rvmIdxFgr = i
                         else outputStates.add(Pair(i, c))
+                    } else {
+                        outputStates.add(Pair(i, -1))
                     }
                 }
-                outputStates.sortBy { if (it.second <= 0) it.second else it.second }
+                outputStates.sortBy { if (it.second <= 0) it.first else it.second }
                 rvmIdxR1o = outputStates.getOrNull(0)?.first ?: -1
                 rvmIdxR2o = outputStates.getOrNull(1)?.first ?: -1
                 rvmIdxR3o = outputStates.getOrNull(2)?.first ?: -1
@@ -648,7 +658,12 @@ class BodyChangerFragment : Fragment() {
             }
 
             val srcShape = rvmInterpreter!!.getInputTensor(rvmIdxSrc).shape()
-            if (isRvmNCHW) { rvmH = srcShape[2]; rvmW = srcShape[3] } else { rvmH = srcShape[1]; rvmW = srcShape[2] }
+            if (srcShape.size >= 4) {
+                if (isRvmNCHW) { rvmH = srcShape[2]; rvmW = srcShape[3] } else { rvmH = srcShape[1]; rvmW = srcShape[2] }
+            } else {
+                rvmH = -1
+                rvmW = -1
+            }
 
             if (rvmH <= 0 || rvmW <= 0 || selectedModel == "RVM Flexable") {
                 rvmH = if (selectedModel.contains("720")) 720 else 192
@@ -665,7 +680,10 @@ class BodyChangerFragment : Fragment() {
             for (i in 0..3) {
                 if (statesInIdx[i] != -1) {
                     val shape = rvmInterpreter!!.getInputTensor(statesInIdx[i]).shape()
-                    var c = if (isRvmNCHW) shape[1] else shape[3]
+                    var c = -1
+                    if (shape.size >= 4) {
+                        c = if (isRvmNCHW) shape[1] else shape[3]
+                    }
                     if (c <= 0) c = defaultChannels[i]
 
                     val h = rvmH / downsamples[i]
@@ -689,8 +707,8 @@ class BodyChangerFragment : Fragment() {
                 rvmRatioBuffer = ByteBuffer.allocateDirect(rvmInterpreter!!.getInputTensor(rvmIdxRatio).numBytes()).order(ByteOrder.nativeOrder())
                 rvmRatioBuffer!!.asFloatBuffer().put(1.0f); rvmInputs!![rvmIdxRatio] = rvmRatioBuffer!!
             }
-            if (rvmIdxFgr != -1) rvmOutputFgr = ByteBuffer.allocateDirect(rvmInterpreter!!.getOutputTensor(rvmIdxFgr).numBytes()).order(ByteOrder.nativeOrder())
-            if (rvmIdxPha != -1) rvmOutputPha = ByteBuffer.allocateDirect(rvmInterpreter!!.getOutputTensor(rvmIdxPha).numBytes()).order(ByteOrder.nativeOrder())
+            if (rvmIdxFgr != -1) rvmOutputFgr = ByteBuffer.allocateDirect(rvmH * rvmW * 3 * 4).order(ByteOrder.nativeOrder())
+            if (rvmIdxPha != -1) rvmOutputPha = ByteBuffer.allocateDirect(rvmH * rvmW * 1 * 4).order(ByteOrder.nativeOrder())
 
             val count = rvmH * rvmW
             rvmOutputFloatArray = FloatArray(count)
@@ -1061,7 +1079,7 @@ class BodyChangerFragment : Fragment() {
 
         for (i in 0 until numAnchors) {
             val score = if (isDetectTransposed) {
-                detData[bestIdx * numFeatures + 4 + targetClassIdx]
+                detData[i * numFeatures + 4 + targetClassIdx]
             } else {
                 detData[(4 + targetClassIdx) * numAnchors + i]
             }
@@ -1383,6 +1401,7 @@ class BodyChangerFragment : Fragment() {
     }
 
     private fun addLog(message: String) {
+        Log.d(tagStr, message)
         activity?.runOnUiThread { _binding?.let { b ->
             val timestamp = sdf.format(Date())
             b.eventLog.text = "[$timestamp] $message\n${b.eventLog.text.toString().take(1000)}"
