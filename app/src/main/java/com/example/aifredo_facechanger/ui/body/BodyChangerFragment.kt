@@ -256,10 +256,6 @@ class BodyChangerFragment : Fragment() {
         rtspQuality = sharedPref.getString("rtsp_quality", "High") ?: "High"
         isMirrorMode = sharedPref.getBoolean("body_mirror_mode", false)
         isHalfBoundary = sharedPref.getBoolean("body_half_boundary", true)
-
-        // Half Boundary 여부에 따라 중앙 세로선(divider) 표시 제어
-        binding.divider.visibility = if (isHalfBoundary) View.VISIBLE else View.GONE
-
         try {
             startColor = Color.parseColor(startColorStr)
             endColor = Color.parseColor(endColorStr)
@@ -840,7 +836,8 @@ class BodyChangerFragment : Fragment() {
         return Bitmap.createBitmap(pixels, bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
     }
 
-    private fun fallbackToEmptyMask(bitmap: Bitmap) {
+    private fun fallbackToEmptyMask(bitmap: Bitmap, reason: String = "Unknown") {
+        Log.w(tagStr, "Fallback to empty mask triggered. Reason: $reason")
         val emptyMask = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ALPHA_8)
         activity?.runOnUiThread {
             _binding?.bodyOverlay?.updateData(emptyMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary)
@@ -870,7 +867,7 @@ class BodyChangerFragment : Fragment() {
                 "MODNet" -> processModNet(safeBitmap)
                 "RVM 192x320", "RVM 720x1280", "RVM", "RVM Flexable" -> processRvm(safeBitmap)
                 "ML Kit" -> processMlKit(safeBitmap)
-                else -> fallbackToEmptyMask(safeBitmap)
+                else -> fallbackToEmptyMask(safeBitmap, "Unknown model selected")
             }
         }
     }
@@ -902,7 +899,7 @@ class BodyChangerFragment : Fragment() {
                     }
 
                     if (byteBuffer == null) {
-                        fallbackToEmptyMask(bitmap)
+                        fallbackToEmptyMask(bitmap, "MP Mask buffer extraction returned null")
                         return
                     }
 
@@ -958,19 +955,19 @@ class BodyChangerFragment : Fragment() {
                         isProcessing.set(false)
                     }
                 } else {
-                    fallbackToEmptyMask(bitmap)
+                    fallbackToEmptyMask(bitmap, "MediaPipe Pose did not return segmentation masks")
                 }
             } catch (e: Exception) {
                 addLog("MediaPipe Pose Error: ${e.message}")
-                fallbackToEmptyMask(bitmap)
+                fallbackToEmptyMask(bitmap, "MediaPipe Pose detection exception: ${e.message}")
             }
         } else {
-            fallbackToEmptyMask(bitmap)
+            fallbackToEmptyMask(bitmap, "MediaPipe Pose landmarker is null")
         }
     }
 
     private fun processMlKit(bitmap: Bitmap) {
-        val segmenter = mlKitSegmenter ?: run { fallbackToEmptyMask(bitmap); return }
+        val segmenter = mlKitSegmenter ?: run { fallbackToEmptyMask(bitmap, "ML Kit Segmenter is null"); return }
         segmenter.process(InputImage.fromBitmap(bitmap, 0))
             .addOnSuccessListener { result ->
                 val maskBuffer = result.buffer; val w = result.width; val h = result.height
@@ -981,20 +978,20 @@ class BodyChangerFragment : Fragment() {
                 activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(maskBitmap, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
             }
             .addOnFailureListener {
-                fallbackToEmptyMask(bitmap)
+                fallbackToEmptyMask(bitmap, "ML Kit processing failure: ${it.message}")
             }
     }
 
     private fun processYolact(bitmap: Bitmap) {
-        val interpreter = yolactInterpreter ?: run { fallbackToEmptyMask(bitmap); return }
+        val interpreter = yolactInterpreter ?: run { fallbackToEmptyMask(bitmap, "YOLACT interpreter is null"); return }
         val tImage = yolactTensorImage!!; tImage.load(bitmap)
-        val inputBuffer = yolactImageProcessor?.process(tImage)?.buffer ?: run { fallbackToEmptyMask(bitmap); return }
+        val inputBuffer = yolactImageProcessor?.process(tImage)?.buffer ?: run { fallbackToEmptyMask(bitmap, "YOLACT image processing returned null"); return }
         yolactOutputBoxes?.clear(); yolactOutputScores?.clear(); yolactOutputCoeffs?.clear(); yolactOutputProtos?.clear()
         val outputs = mapOf(yolactIdxBoxes to yolactOutputBoxes!!, yolactIdxScores to yolactOutputScores!!, yolactIdxCoeffs to yolactOutputCoeffs!!, yolactIdxProtos to yolactOutputProtos!!)
         try {
             interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
         } catch (e: Exception) {
-            fallbackToEmptyMask(bitmap)
+            fallbackToEmptyMask(bitmap, "YOLACT inference exception: ${e.message}")
             return
         }
 
@@ -1029,20 +1026,20 @@ class BodyChangerFragment : Fragment() {
             }
         }
 
-        fallbackToEmptyMask(bitmap)
+        fallbackToEmptyMask(bitmap, "YOLACT score threshold not met or bestIdx not found")
     }
 
     private fun processYolo26nSeg(bitmap: Bitmap) {
-        val interpreter = yolo26nInterpreter ?: run { fallbackToEmptyMask(bitmap); return }
+        val interpreter = yolo26nInterpreter ?: run { fallbackToEmptyMask(bitmap, "Yolo26n interpreter is null"); return }
         val tImage = yolo26nTensorImage!!; tImage.load(bitmap)
-        val inputBuffer = yolo26nImageProcessor?.process(tImage)?.buffer ?: run { fallbackToEmptyMask(bitmap); return }
+        val inputBuffer = yolo26nImageProcessor?.process(tImage)?.buffer ?: run { fallbackToEmptyMask(bitmap, "Yolo26n image processing returned null"); return }
 
         yolo26nOutput0?.clear(); yolo26nOutput1?.clear()
         val outputs = mapOf(0 to yolo26nOutput0!!, 1 to yolo26nOutput1!!)
         try {
             interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
         } catch (e: Exception) {
-            fallbackToEmptyMask(bitmap)
+            fallbackToEmptyMask(bitmap, "Yolo26n inference exception: ${e.message}")
             return
         }
 
@@ -1069,7 +1066,7 @@ class BodyChangerFragment : Fragment() {
         val detData = FloatArray(fbDet.remaining()); fbDet.get(detData)
 
         if (numFeatures < 5) {
-            fallbackToEmptyMask(bitmap)
+            fallbackToEmptyMask(bitmap, "Yolo26n numFeatures too small ($numFeatures)")
             return
         }
 
@@ -1127,7 +1124,7 @@ class BodyChangerFragment : Fragment() {
 
             activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
         } else {
-            fallbackToEmptyMask(bitmap)
+            fallbackToEmptyMask(bitmap, "Yolo26n score threshold not met")
         }
     }
 
@@ -1184,14 +1181,14 @@ class BodyChangerFragment : Fragment() {
     }
 
     private fun processModNet(bitmap: Bitmap) {
-        val interpreter = modnetInterpreter ?: run { fallbackToEmptyMask(bitmap); return }
+        val interpreter = modnetInterpreter ?: run { fallbackToEmptyMask(bitmap, "MODNet interpreter is null"); return }
         val tImage = modnetTensorImage!!; tImage.load(bitmap)
-        val inputBuffer = modnetImageProcessor?.process(tImage)?.buffer ?: run { fallbackToEmptyMask(bitmap); return }
+        val inputBuffer = modnetImageProcessor?.process(tImage)?.buffer ?: run { fallbackToEmptyMask(bitmap, "MODNet image processing returned null"); return }
         modnetOutputBuffer?.clear()
         try {
             interpreter.run(inputBuffer, modnetOutputBuffer)
         } catch (e: Exception) {
-            fallbackToEmptyMask(bitmap)
+            fallbackToEmptyMask(bitmap, "MODNet inference exception: ${e.message}")
             return
         }
         modnetOutputBuffer?.rewind(); val fb = modnetOutputBuffer?.asFloatBuffer() ?: return
@@ -1218,13 +1215,13 @@ class BodyChangerFragment : Fragment() {
     }
 
     private fun processYoloxTiny(bitmap: Bitmap) {
-        val yolox = yoloxInterpreter ?: run { fallbackToEmptyMask(bitmap); return }
+        val yolox = yoloxInterpreter ?: run { fallbackToEmptyMask(bitmap, "YoloxTiny interpreter is null"); return }
         val yoloxInput = convertBitmapToByteBuffer(bitmap, yoloxW, yoloxH, isYoloxNchw)
         yoloxOutputBuffer?.clear()
         try {
             yolox.run(yoloxInput, yoloxOutputBuffer)
         } catch (e: Exception) {
-            fallbackToEmptyMask(bitmap)
+            fallbackToEmptyMask(bitmap, "YoloxTiny inference exception: ${e.message}")
             return
         }
         yoloxOutputBuffer?.rewind(); val yoloxFb = yoloxOutputBuffer?.asFloatBuffer() ?: return
@@ -1245,19 +1242,22 @@ class BodyChangerFragment : Fragment() {
         if (bestBox != null) {
             activity?.runOnUiThread { _binding?.bodyOverlay?.updateBoundingBox(bestBox, bitmap, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
         } else {
-            fallbackToEmptyMask(bitmap)
+            fallbackToEmptyMask(bitmap, "YoloxTiny bestBox not found")
         }
     }
 
     private fun processYoloxHybrid(bitmap: Bitmap) {
         val yolox = yoloxInterpreter; val rvm = rvmInterpreter
-        if (yolox == null || rvm == null) { fallbackToEmptyMask(bitmap); return }
+        if (yolox == null || rvm == null) { fallbackToEmptyMask(bitmap, "YOLOX or RVM interpreter is null"); return }
+
+        Log.d(tagStr, "processYoloxHybrid: Running YOLOX inference")
         val yoloxInput = convertBitmapToByteBuffer(bitmap, yoloxW, yoloxH, isYoloxNchw)
         yoloxOutputBuffer?.clear()
         try {
             yolox.run(yoloxInput, yoloxOutputBuffer)
         } catch (e: Exception) {
-            fallbackToEmptyMask(bitmap)
+            Log.e(tagStr, "YOLOX Hybrid YOLOX exception", e)
+            fallbackToEmptyMask(bitmap, "YOLOX inference exception in hybrid mode: ${e.message}")
             return
         }
         yoloxOutputBuffer?.rewind(); val fbYolox = yoloxOutputBuffer?.asFloatBuffer() ?: return
@@ -1281,9 +1281,9 @@ class BodyChangerFragment : Fragment() {
         var right = (bestBox.right + px).toInt().coerceAtMost(bitmap.width); var bottom = (bestBox.bottom + py).toInt().coerceAtMost(bitmap.height)
         if (right <= left || bottom <= top) { left = 0; top = 0; right = bitmap.width; bottom = bitmap.height }
         val cropped = Bitmap.createBitmap(bitmap, left, top, right - left, bottom - top)
-        val tImage = rvmTensorImage ?: run { cropped.recycle(); fallbackToEmptyMask(bitmap); return }
+        val tImage = rvmTensorImage ?: run { cropped.recycle(); fallbackToEmptyMask(bitmap, "RVM TensorImage is null"); return }
         tImage.load(cropped)
-        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: run { cropped.recycle(); fallbackToEmptyMask(bitmap); return }
+        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: run { cropped.recycle(); fallbackToEmptyMask(bitmap, "RVM ImageProcessor returned null"); return }
 
         val totalPixels = rvmW * rvmH; val inputs = rvmInputs!!; val outputs = rvmOutputs!!
         if (isRvmNCHW) {
@@ -1297,10 +1297,17 @@ class BodyChangerFragment : Fragment() {
                     val p = i * 3; nchwArr[i] = inArr[p]; nchwArr[totalPixels + i] = inArr[p + 1]; nchwArr[totalPixels * 2 + i] = inArr[p + 2]
                 }
                 nchw.asFloatBuffer().put(nchwArr); nchw.rewind(); inputs[rvmIdxSrc] = nchw
-            } else inputs[rvmIdxSrc] = inputBuffer
-        } else inputs[rvmIdxSrc] = inputBuffer
+            } else {
+                Log.w(tagStr, "processYoloxHybrid NCHW fbIn size mismatch")
+                inputs[rvmIdxSrc] = inputBuffer
+            }
+        } else {
+            inputs[rvmIdxSrc] = inputBuffer
+        }
 
         val nextToggle = 1 - rvmStateToggle
+        Log.d(tagStr, "processYoloxHybrid: Preparing states. toggle=$rvmStateToggle, next=$nextToggle")
+
         val statesIn = intArrayOf(rvmIdxR1i, rvmIdxR2i, rvmIdxR3i, rvmIdxR4i)
         for (i in 0..3) if (statesIn[i] != -1) { inputs[statesIn[i]] = rvmStateBuffers[i][rvmStateToggle]!!; rvmStateBuffers[i][rvmStateToggle]?.rewind() }
         if (rvmIdxRatio != -1) rvmRatioBuffer?.rewind()
@@ -1310,7 +1317,15 @@ class BodyChangerFragment : Fragment() {
         if (rvmIdxFgr != -1) { outputs[rvmIdxFgr] = rvmOutputFgr!!; rvmOutputFgr?.clear() }
         if (rvmIdxPha != -1) { outputs[rvmIdxPha] = rvmOutputPha!!; rvmOutputPha?.clear() }
 
-        try { rvm.runForMultipleInputsOutputs(inputs, outputs); rvmStateToggle = nextToggle } catch (e: Exception) { cropped.recycle(); fallbackToEmptyMask(bitmap); return }
+        try {
+            rvm.runForMultipleInputsOutputs(inputs, outputs); rvmStateToggle = nextToggle
+            Log.d(tagStr, "processYoloxHybrid: RVM inference successful")
+        } catch (e: Exception) {
+            Log.e(tagStr, "YOLOX Hybrid RVM inference exception", e)
+            cropped.recycle()
+            fallbackToEmptyMask(bitmap, "RVM inference exception in hybrid mode: ${e.message}")
+            return
+        }
 
         rvmOutputPha?.rewind(); val fbOut = rvmOutputPha?.asFloatBuffer() ?: return
         val outArr = rvmOutputFloatArray ?: FloatArray(totalPixels).also { rvmOutputFloatArray = it }
@@ -1332,16 +1347,25 @@ class BodyChangerFragment : Fragment() {
             activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(fullMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
         } else {
             cropped.recycle()
-            fallbackToEmptyMask(bitmap)
+            fallbackToEmptyMask(bitmap, "RVM Hybrid output size mismatch: expected ${outArr.size}, got ${fbOut.remaining()}")
         }
         cropped.recycle()
     }
 
     private fun processRvm(bitmap: Bitmap) {
         val interpreter = rvmInterpreter; val inputs = rvmInputs; val outputs = rvmOutputs
-        if (interpreter == null || inputs == null || outputs == null || rvmIdxSrc == -1) { fallbackToEmptyMask(bitmap); return }
+        if (interpreter == null || inputs == null || outputs == null || rvmIdxSrc == -1) {
+            fallbackToEmptyMask(bitmap, "RVM resources are null or idxSrc is -1")
+            return
+        }
+
+        Log.d(tagStr, "processRvm: Started processing frame")
         val tImage = rvmTensorImage!!; tImage.load(bitmap)
-        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: run { fallbackToEmptyMask(bitmap); return }
+        val inputBuffer = rvmImageProcessor?.process(tImage)?.buffer ?: run {
+            fallbackToEmptyMask(bitmap, "RVM image processor returned null")
+            return
+        }
+
         val totalPixels = rvmW * rvmH
         if (isRvmNCHW) {
             val nchw = rvmNchwBuffer!!; nchw.clear()
@@ -1354,9 +1378,17 @@ class BodyChangerFragment : Fragment() {
                     val p = i * 3; nchwArr[i] = inArr[p]; nchwArr[totalPixels + i] = inArr[p + 1]; nchwArr[totalPixels * 2 + i] = inArr[p + 2]
                 }
                 nchw.asFloatBuffer().put(nchwArr); nchw.rewind(); inputs[rvmIdxSrc] = nchw
-            } else inputs[rvmIdxSrc] = inputBuffer
-        } else inputs[rvmIdxSrc] = inputBuffer
+            } else {
+                Log.w(tagStr, "processRvm NCHW conversion: fbIn remaining (${fbIn.remaining()}) less than inArr size (${inArr.size})")
+                inputs[rvmIdxSrc] = inputBuffer
+            }
+        } else {
+            inputs[rvmIdxSrc] = inputBuffer
+        }
+
         val nextToggle = 1 - rvmStateToggle
+        Log.d(tagStr, "processRvm: Toggling state. Current=$rvmStateToggle, Next=$nextToggle")
+
         val statesIn = intArrayOf(rvmIdxR1i, rvmIdxR2i, rvmIdxR3i, rvmIdxR4i)
         for (i in 0..3) if (statesIn[i] != -1) { inputs[statesIn[i]] = rvmStateBuffers[i][rvmStateToggle]!!; rvmStateBuffers[i][rvmStateToggle]?.rewind() }
         if (rvmIdxRatio != -1) rvmRatioBuffer?.rewind()
@@ -1365,13 +1397,17 @@ class BodyChangerFragment : Fragment() {
         for (i in 0..3) if (statesOut[i] != -1) { outputs[statesOut[i]] = rvmStateBuffers[i][nextToggle]!!; rvmStateBuffers[i][nextToggle]?.clear() }
         if (rvmIdxFgr != -1) { outputs[rvmIdxFgr] = rvmOutputFgr!!; rvmOutputFgr?.clear() }
         if (rvmIdxPha != -1) { outputs[rvmIdxPha] = rvmOutputPha!!; rvmOutputPha?.clear() }
+
         try {
             interpreter.runForMultipleInputsOutputs(inputs, outputs); rvmStateToggle = nextToggle
+            Log.d(tagStr, "processRvm: Inference successful")
         } catch (e: Exception) {
             addLog("RVM Process Error: ${e.message}")
-            fallbackToEmptyMask(bitmap)
+            Log.e(tagStr, "processRvm inference exception", e)
+            fallbackToEmptyMask(bitmap, "RVM Process exception: ${e.message}")
             return
         }
+
         rvmOutputPha?.rewind(); val fbOut = rvmOutputPha?.asFloatBuffer() ?: return
         val outArr = rvmOutputFloatArray ?: FloatArray(totalPixels).also { rvmOutputFloatArray = it }
         if (fbOut.remaining() >= outArr.size) {
@@ -1396,7 +1432,8 @@ class BodyChangerFragment : Fragment() {
 
             activity?.runOnUiThread { _binding?.bodyOverlay?.updateData(finalMask, bitmap, startColor, endColor, isMirrorMode, isHalfBoundary); isProcessing.set(false) }
         } else {
-            fallbackToEmptyMask(bitmap)
+            Log.w(tagStr, "processRvm: Output remaining (${fbOut.remaining()}) less than expected (${outArr.size})")
+            fallbackToEmptyMask(bitmap, "Output array size mismatch")
         }
     }
 
